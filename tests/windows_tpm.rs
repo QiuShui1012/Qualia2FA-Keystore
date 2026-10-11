@@ -35,7 +35,7 @@ mod common;
 
 use common::{TestLabel, hardware_store, software_store};
 // trait 必须显式引入才能调用它的方法。
-use qualia2fa_keystore::DeviceKeyStore;
+use qualia_dik::DeviceKeyStore;
 
 /// **最关键的一条**：硬件签出来的签名必须能被 `qualia2fa-core` 的验签函数接受。
 ///
@@ -71,14 +71,14 @@ fn tpm_signature_verifies_with_core() {
         "签名长度不是 64 字节，说明后端返回的不是原始 r||s"
     );
 
-    qualia2fa_core::device::verify(signer.public_key(), message, &signature)
+    qualia_dik::device::verify(signer.public_key(), message, &signature)
         .expect("Core 必须接受 TPM 签出来的签名");
 
     // 改一个 bit 的消息必须验不过——否则说明验签根本没在看消息。
     let mut tampered = *message;
     tampered[0] ^= 0x01;
     assert!(
-        qualia2fa_core::device::verify(signer.public_key(), &tampered, &signature).is_err(),
+        qualia_dik::device::verify(signer.public_key(), &tampered, &signature).is_err(),
         "被篡改的消息通过了验证"
     );
 
@@ -111,7 +111,7 @@ fn identity_is_stable_across_reopen() {
     // 用重新打开的句柄也能签，且公钥仍匹配。
     let message = b"reopen test";
     let signature = reopened.sign(message).expect("签名");
-    qualia2fa_core::device::verify(reopened.public_key(), message, &signature)
+    qualia_dik::device::verify(reopened.public_key(), message, &signature)
         .expect("重开后签名仍应验证通过");
 
     store.delete(label.as_str()).expect("清理");
@@ -137,10 +137,7 @@ fn duplicate_create_is_rejected_and_preserves_identity() {
 
     let error = store.create(label.as_str()).expect_err("重复创建应被拒绝");
     assert!(
-        matches!(
-            error,
-            qualia2fa_keystore::KeyStoreError::KeyAlreadyExists { .. }
-        ),
+        matches!(error, qualia_dik::KeyStoreError::KeyAlreadyExists { .. }),
         "错误类型不对: {error:?}"
     );
 
@@ -197,13 +194,13 @@ fn missing_label_reports_not_found() {
 
     let error = store.open(label.as_str()).expect_err("应报不存在");
     assert!(
-        matches!(error, qualia2fa_keystore::KeyStoreError::KeyNotFound { .. }),
+        matches!(error, qualia_dik::KeyStoreError::KeyNotFound { .. }),
         "错误类型不对: {error:?}"
     );
 
     let error = store.delete(label.as_str()).expect_err("应报不存在");
     assert!(
-        matches!(error, qualia2fa_keystore::KeyStoreError::KeyNotFound { .. }),
+        matches!(error, qualia_dik::KeyStoreError::KeyNotFound { .. }),
         "错误类型不对: {error:?}"
     );
 }
@@ -238,11 +235,11 @@ fn tpm_backend_reports_tpm() {
         return;
     };
     assert_eq!(
-        qualia2fa_keystore::DeviceKeyStore::backend(&store),
-        qualia2fa_keystore::Backend::Tpm
+        qualia_dik::DeviceKeyStore::backend(&store),
+        qualia_dik::Backend::Tpm
     );
     assert!(
-        qualia2fa_keystore::DeviceKeyStore::backend(&store).is_hardware_backed(),
+        qualia_dik::DeviceKeyStore::backend(&store).is_hardware_backed(),
         "TPM 后端必须被判定为硬件保护"
     );
 }
@@ -261,17 +258,17 @@ fn software_provider_also_signs_and_verifies() {
 
     let signer = store.create(label.as_str()).expect("创建软件密钥");
     assert_eq!(
-        qualia2fa_keystore::DeviceKeyStore::backend(&store),
-        qualia2fa_keystore::Backend::Software
+        qualia_dik::DeviceKeyStore::backend(&store),
+        qualia_dik::Backend::Software
     );
     assert!(
-        !qualia2fa_keystore::DeviceKeyStore::backend(&store).is_hardware_backed(),
+        !qualia_dik::DeviceKeyStore::backend(&store).is_hardware_backed(),
         "软件后端不得被判定为硬件保护"
     );
 
     let message = b"software path";
     let signature = signer.sign(message).expect("签名");
-    qualia2fa_core::device::verify(signer.public_key(), message, &signature)
+    qualia_dik::device::verify(signer.public_key(), message, &signature)
         .expect("软件后端的签名同样必须被 Core 接受");
 
     store.delete(label.as_str()).expect("清理");
@@ -286,10 +283,7 @@ fn invalid_labels_are_rejected_before_touching_hardware() {
     for bad in ["", "a/b", "a\0b", "has space", "设备", &"x".repeat(200)] {
         let error = store.open(bad).expect_err("应拒绝");
         assert!(
-            matches!(
-                error,
-                qualia2fa_keystore::KeyStoreError::InvalidKeyLabel { .. }
-            ),
+            matches!(error, qualia_dik::KeyStoreError::InvalidKeyLabel { .. }),
             "标签 {bad:?} 的错误类型不对: {error:?}"
         );
     }

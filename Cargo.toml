@@ -1,54 +1,57 @@
 [package]
-name = "qualia2fa-keystore"
+name = "qualia-dik"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "LGPL-3.0-or-later"
-description = "Qualia2FA 的平台硬件密钥库层：设备身份密钥对的生成、保管与签名"
-repository = "https://github.com/QiuShui1012/Qualia2FA-Keystore"
-publish = false
+description = "Device identity kit: P-256 device identity primitives and platform-native, hardware-backed keystores."
+repository = "https://github.com/Qualia2FA/QualiaDeviceIdentityKit"
+keywords = ["ecdsa", "p256", "keystore", "tpm", "identity"]
+categories = ["cryptography", "hardware-support"]
+readme = "README.md"
 
 # 这个 crate 是**唯一**允许出现 `unsafe` 的地方，也是唯一允许接触平台原生 API
 # （Windows CNG、Android Keystore……）的地方。
 #
-# 它存在的理由是让 `qualia2fa-core` 能保住 `#![forbid(unsafe_code)]`。因此**不要**
-# 把协议逻辑、密码学原语或任何可以纯 Rust 实现的东西放进来——那些属于 Core。
-# 这里只做一件事：把「在硬件里生成一个 P-256 密钥、让硬件对一段摘要签名、取回
-# 公钥」这三步封装成安全的 Rust 接口。
+# 它只做两件事：
+#
+# 1. **设备身份的公钥侧**（`src/device.rs`）：表示、指纹、验签。不持私钥、不签名。
+# 2. **调用平台密钥库**（`src/keystore.rs`）：生成密钥、取公钥、对消息签名。
+#
+# 两件事放在一个 crate 里是因为它们是同一个概念的**两半**：设备身份。拆开会让
+# 「公钥类型在哪」与「谁来生成它」变成两个需要各自回答的问题，而任何用到其中一半的
+# 下游都不得不依赖两处。
+#
+# **不要**把协议逻辑或任何可以纯 Rust 实现、且与设备身份无关的东西放进来——那些
+# 属于下游应用。放进来的东西就无法被 fuzz、无法在 CI 上跨平台跑，并且活在
+# `forbid(unsafe_code)` 的保护之外。
 #
 # `unsafe_code` 不 forbid 而是 deny 于**模块级**由各平台后端自行收窄（见
-# `src/windows.rs` 的 `#![deny(unsafe_op_in_unsafe_fn)]` 一类约束）。
+# `src/keystore/platform/windows.rs`）。
 # 顶层不写 `#![forbid(unsafe_code)]`，因为平台 FFI 调用本质上就是 unsafe。
 
 [dependencies]
-qualia2fa-core = { path = "Core" }
-
-# SHA-256：硬件签名接口收的是**摘要**而不是消息（Windows CNG 的形参就叫
-# `pbHashValue`），所以「消息 → 摘要」这一步必须由我们做。
+# P-256：公钥解析与验签（公钥侧），加上 `mock` 后端的软件签名器。
 #
-# 版本必须与 Core 的 `sha2` 一致（0.11），否则会出现两份 SHA-2。
+# `ecdsa` 提供 `VerifyingKey` / `Signature` / `Verifier`；`std` 让错误类型能实现
+# `std::error::Error`。
+#
+# 版本必须是 0.14：0.13 依赖 `sha2 ^0.10`，会拖进第二份 SHA-2。同理它必须与下游的
+# `p256` 版本一致，否则一个二进制里会出现两条 P-256 实现。
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
+
+# SHA-256 有两个用途：算设备身份指纹，以及把「消息」变成硬件签名接口要的「摘要」
+# （Windows CNG 的形参就叫 `pbHashValue`）。
 sha2 = "0.11"
 
-# OS CSPRNG。只被 `mock` 后端用来生成测试私钥；真实后端从不需要随机数——
-# 密钥是在 TPM / Secure Enclave 内部生成的，随机性由硬件负责。
-#
-# 不是可选依赖：`mock` 模块在 `cfg(test)` 下编译，而 `cfg(test)` 不会启用任何
-# feature，所以可选依赖在测试构建里会缺失。
-getrandom = "0.4.3"
-
-# 错误类型。与 Core 用同一个 major，避免出现两份 thiserror。
+# 错误类型。与下游用同一个 major，避免出现两份 thiserror。
 thiserror = "2.0.21"
 
-# P-256 私钥运算，**只被 `mock` 后端使用**（签名器的纯软件实现）。真实后端不需要
-# 它：那边只有公钥解析与签名格式转换，属于 Core 的职责。
+# OS CSPRNG。**只被 `mock` 后端**用来生成测试私钥——真实后端从不需要随机数：
+# 密钥是在 TPM / Secure Enclave 内部生成的，随机性由硬件负责。
 #
-# 为什么是「可选依赖」而不是「开发依赖」：`mock` 既要在 `cfg(test)` 下编译，也要
-# 能被上层通过 `--features mock` 启用。开发依赖在后者里是看不见的——用开发依赖会
-# 让 `cargo check --features mock` 直接编译失败，而那种失败只在 CI 的 feature 组合
-# 检查里才会暴露。
-#
-# 版本必须是 0.14：0.13 依赖 `sha2 ^0.10`，会拖进第二份 SHA-2。
-p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"], optional = true }
+# 可选，因为生产构建不该带着它：没有这条路径时用户不会意外拿到一把软件密钥。
+getrandom = { version = "0.4.3", optional = true }
 
 # Windows CNG（`NCrypt*`）。`windows-sys` 通过 `windows_link::link!` 直接声明
 # 导入库符号，因此**不需要** `LoadLibrary` / `GetProcAddress`，也不需要 `libloading`。
@@ -64,20 +67,15 @@ windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography"] }
 #
 # **默认不开启。** 开启它意味着生产构建里也存在一条「没有硬件保护」的路径，
 # 而那条路径看起来与真实路径毫无区别——把它变成必须显式选择的东西。
-mock = ["dep:p256"]
+mock = ["dep:getrandom"]
 
 [dev-dependencies]
-# **自引用**：让 `cfg(test)` 构建自动启用 `mock` feature。
+# 让 `cfg(test)` 构建自动拿到与 `--features mock` 相同的依赖。
 #
-# 为什么需要它：`p256` 是可选依赖，只在 `mock` 后端里用到，而 `cargo test` 不会
-# 自己启用任何 feature——它只编译 `--all-targets`。`mock` 模块虽然由
-# `cfg(any(test, feature = "mock"))` 在测试时被包含，但它的依赖不会跟着来，于是
-# 报 `cannot find module or crate p256`。
-#
-# 把本 crate 作为自己的开发依赖并开启 `mock`，会让测试构建里 feature 被统一打开。
-# 这比「把 p256 降级成永远存在的普通依赖」更好：后者会让生产构建也带着一份根本
-# 用不到的 P-256 私钥运算实现。
-qualia2fa-keystore = { path = ".", features = ["mock"] }
+# `mock` 模块由 `cfg(any(test, feature = "mock"))` 包含，因此在测试构建里它**总会**
+# 被编译——而它依赖的 `getrandom` 不会跟着来（`cargo test` 不启用任何 feature）。
+# 这里给它一条普通的开发依赖即可。
+getrandom = "0.4.3"
 
 [lints.rust]
 missing_docs = "warn"

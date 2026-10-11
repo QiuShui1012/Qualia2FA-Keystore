@@ -33,10 +33,10 @@
 //! 「占位」的含义是**每一个操作都失败**，而不是「有一个能用的软件实现」。理由见
 //! `platform_stub.rs` 的模块文档。
 //!
-//! # 只有一个入口：[`crate::platform::PlatformKeyStore`]
+//! # 只有一个入口：[`crate::keystore::platform::PlatformKeyStore`]
 //!
-//! 上层**不要**直接引用 [`crate::platform::WindowsKeyStore`] 之类的具体后端。请用
-//! [`crate::platform::PlatformKeyStore`]——它在每个平台上都存在，因而 FFI 层与 UI 层可以
+//! 上层**不要**直接引用 [`crate::keystore::platform::WindowsKeyStore`] 之类的具体后端。请用
+//! [`crate::keystore::platform::PlatformKeyStore`]——它在每个平台上都存在，因而 FFI 层与 UI 层可以
 //! **零分支**编译。平台差异只在本文件的一处 `cfg` 里，而不是散落在每一个调用点。
 //!
 //! # 新增一个平台后端时要做什么
@@ -53,7 +53,7 @@
 //!
 //! - 私钥**不得**离开硬件，也不得进入本进程的地址空间。
 //! - 签名接口收**摘要**、吐**原始 `r||s`**（64 字节），与
-//!   [`crate::traits::DIGEST_LEN`] 的约定一致。
+//!   [`crate::keystore::traits::DIGEST_LEN`] 的约定一致。
 //! - 出错时返回 [`crate::KeyStoreError`]，**不得 panic**。
 //! - 每个 `unsafe` 块都要有 `// SAFETY:` 说明。
 
@@ -88,10 +88,10 @@ pub use platform_stub::StubProvider as PlatformProvider;
 /// Windows 后端的主要类型。
 ///
 /// 在这里再导出是为了让调用方只需记住**一个**路径
-/// （`qualia2fa_keystore::platform::WindowsKeyStore`），而不必知道它具体放在哪个
+/// （`qualia_dik::keystore::platform::WindowsKeyStore`），而不必知道它具体放在哪个
 /// 子模块里。
 ///
-/// 新代码请优先用 [`crate::platform::PlatformKeyStore`]：它可移植，而本别名只在 Windows 上存在。
+/// 新代码请优先用 [`crate::keystore::platform::PlatformKeyStore`]：它可移植，而本别名只在 Windows 上存在。
 #[cfg(target_os = "windows")]
 pub use windows::{WindowsKeyStore, WindowsProvider};
 

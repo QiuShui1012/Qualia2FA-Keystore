@@ -39,10 +39,12 @@
 //! 私钥用 `zeroize` 擦除。这与真实后端形成有趣对比：真实后端的私钥根本不在本
 //! 进程里，所以那边没有任何需要擦除的东西。
 
-use crate::error::{KeyStoreError, Result};
-use crate::traits::{Backend, DIGEST_LEN, DeviceKeyStore, DeviceSigner, public_key_from_sec1};
+use crate::device::{DevicePublicKey, DeviceSignature};
+use crate::keystore::traits::{
+    Backend, DIGEST_LEN, DeviceKeyStore, DeviceSigner, public_key_from_sec1,
+};
+use crate::{Error, Result};
 use p256::ecdsa::{Signature, SigningKey, signature::hazmat::PrehashSigner};
-use qualia2fa_core::{DevicePublicKey, DeviceSignature};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -83,17 +85,17 @@ impl DeviceKeyStore for MockKeyStore {
     }
 
     fn open(&self, label: &str) -> Result<Box<dyn DeviceSigner>> {
-        let keys = self.keys.lock().map_err(|_| KeyStoreError::Hardware {
+        let keys = self.keys.lock().map_err(|_| Error::Hardware {
             operation: "MockKeyStore 内部锁中毒",
             code: 0,
         })?;
-        let signing = keys.get(label).ok_or_else(|| KeyStoreError::KeyNotFound {
+        let signing = keys.get(label).ok_or_else(|| Error::KeyNotFound {
             label: label.to_string(),
         })?;
 
         // 复制一份标量出来，这样不持有锁也能签名。
         let bytes = signing.to_bytes();
-        let owned = SigningKey::from_slice(&bytes).map_err(|_| KeyStoreError::Hardware {
+        let owned = SigningKey::from_slice(&bytes).map_err(|_| Error::Hardware {
             operation: "MockKeyStore 私钥复制失败",
             code: 0,
         })?;
@@ -103,25 +105,24 @@ impl DeviceKeyStore for MockKeyStore {
     }
 
     fn create(&self, label: &str) -> Result<Box<dyn DeviceSigner>> {
-        let mut keys = self.keys.lock().map_err(|_| KeyStoreError::Hardware {
+        let mut keys = self.keys.lock().map_err(|_| Error::Hardware {
             operation: "MockKeyStore 内部锁中毒",
             code: 0,
         })?;
         if keys.contains_key(label) {
             // 与 Windows 后端保持一致：**绝不覆盖**已有身份。
             // 覆盖会悄悄换掉设备身份，是最难排查的一类 bug。
-            return Err(KeyStoreError::Hardware {
+            return Err(Error::Hardware {
                 operation: "MockKeyStore::create（同名密钥已存在，拒绝覆盖）",
                 code: 0,
             });
         }
         // 用 OS CSPRNG 生成。`SigningKey::random` 需要 `rand_core` 的实现，
         // 这里改用 `getrandom` 直接取 32 字节再规约——避免为一处测试引入 rand 生态。
-        let signing =
-            SigningKey::from_slice(&random_scalar()?).map_err(|_| KeyStoreError::Hardware {
-                operation: "MockKeyStore 生成标量失败",
-                code: 0,
-            })?;
+        let signing = SigningKey::from_slice(&random_scalar()?).map_err(|_| Error::Hardware {
+            operation: "MockKeyStore 生成标量失败",
+            code: 0,
+        })?;
         let public = public_key_from_signing(&signing)?;
         keys.insert(label.to_string(), signing);
         drop(keys);
@@ -132,12 +133,12 @@ impl DeviceKeyStore for MockKeyStore {
     }
 
     fn delete(&self, label: &str) -> Result<()> {
-        let mut keys = self.keys.lock().map_err(|_| KeyStoreError::Hardware {
+        let mut keys = self.keys.lock().map_err(|_| Error::Hardware {
             operation: "MockKeyStore 内部锁中毒",
             code: 0,
         })?;
         if keys.remove(label).is_none() {
-            return Err(KeyStoreError::KeyNotFound {
+            return Err(Error::KeyNotFound {
                 label: label.to_string(),
             });
         }
@@ -151,7 +152,7 @@ impl DeviceKeyStore for MockKeyStore {
 /// 处理而不是 panic。
 fn random_scalar() -> Result<[u8; 32]> {
     let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes).map_err(|_| KeyStoreError::Hardware {
+    getrandom::fill(&mut bytes).map_err(|_| Error::Hardware {
         operation: "MockKeyStore 无法从 OS 取得随机数",
         code: 0,
     })?;
@@ -235,7 +236,7 @@ impl DeviceSigner for MockSigner {
 
     fn sign_digest(&self, digest: &[u8]) -> Result<DeviceSignature> {
         if digest.len() != DIGEST_LEN {
-            return Err(KeyStoreError::InvalidDigestLength {
+            return Err(Error::InvalidDigestLength {
                 expected: DIGEST_LEN,
                 actual: digest.len(),
             });
@@ -244,18 +245,18 @@ impl DeviceSigner for MockSigner {
         let signature: Signature =
             self.signing
                 .sign_prehash(digest)
-                .map_err(|_| KeyStoreError::Hardware {
+                .map_err(|_| Error::Hardware {
                     operation: "MockKeyStore 签名失败",
                     code: 0,
                 })?;
-        crate::traits::signature_from_raw(&signature.to_bytes())
+        crate::keystore::traits::signature_from_raw(&signature.to_bytes())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qualia2fa_core::device;
+    use crate::device;
 
     /// 建了就能打开，且公钥一致。
     #[test]
@@ -276,7 +277,7 @@ mod tests {
     fn open_missing_key_does_not_create() {
         let store = MockKeyStore::new();
         let error = store.open("nope").expect_err("应失败");
-        assert!(matches!(error, KeyStoreError::KeyNotFound { .. }));
+        assert!(matches!(error, Error::KeyNotFound { .. }));
         assert!(
             store.open("nope").is_err(),
             "第一次 open 竟然创建了密钥——open 必须只读"
@@ -345,7 +346,7 @@ mod tests {
         let signer = store.create("device").expect("创建");
         assert!(matches!(
             signer.sign_digest(&[0_u8; 20]),
-            Err(KeyStoreError::InvalidDigestLength { .. })
+            Err(Error::InvalidDigestLength { .. })
         ));
     }
 
@@ -361,7 +362,7 @@ mod tests {
         // 重复删除报 KeyNotFound。
         assert!(matches!(
             store.delete("device"),
-            Err(KeyStoreError::KeyNotFound { .. })
+            Err(Error::KeyNotFound { .. })
         ));
     }
 

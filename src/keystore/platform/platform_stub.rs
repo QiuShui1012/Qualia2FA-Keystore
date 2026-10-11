@@ -16,11 +16,11 @@
 //! 尚未实现后端的平台上的回退实现。
 //!
 //! 本模块在**除 Windows 之外的所有平台**上编译。它的每一个操作都返回
-//! [`crate::KeyStoreError::UnsupportedPlatform`]——**不提供任何密钥功能**。
+//! [`crate::Error::UnsupportedPlatform`]——**不提供任何密钥功能**。
 //!
 //! # 为什么要有这个模块，而不是干脆没有后端
 //!
-//! 因为它让**上层的代码不必为平台写分支**。`qualia2fa_keystore::platform::PlatformKeyStore`
+//! 因为它让**上层的代码不必为平台写分支**。`qualia_dik::keystore::platform::PlatformKeyStore`
 //! 在 Windows 上是真实实现、在其余平台上是本类型，两者满足同一组 trait。于是 FFI
 //! 层与 UI 层可以按 `cfg(target_os)` **零分支**地编译，所有平台差异都收在
 //! [`super`] 的一处 `cfg` 里。
@@ -31,14 +31,14 @@
 //! 与「本平台有硬件后端且已在用」在调用方看来完全一样——那正是「静默降级」，
 //! 是本项目明确禁止的：用户会以为自己受硬件保护，而私钥其实只是一个软件文件。
 //!
-//! 因此本类型**如实报告** [`crate::traits::Backend::Unavailable`]，并且永远不产出
+//! 因此本类型**如实报告** [`crate::keystore::traits::Backend::Unavailable`]，并且永远不产出
 //! [`crate::DeviceSigner`]。上层拿到 `UnsupportedPlatform` 后应当提示用户
 //! 「本平台尚未支持设备身份」，而不是继续往下走。
 
 use core::fmt;
 
-use crate::error::{KeyStoreError, Result};
-use crate::traits::{Backend, DeviceKeyStore};
+use crate::keystore::traits::{Backend, DeviceKeyStore};
+use crate::{Error, Result};
 
 /// 占位的存储提供程序。
 ///
@@ -50,21 +50,21 @@ pub struct StubProvider;
 impl StubProvider {
     /// 本平台名称，用于错误消息。
     ///
-    /// 转发到 [`crate::platform::platform_identity`]：那里是「平台叫什么、计划用
+    /// 转发到 [`crate::keystore::platform::platform_identity`]：那里是「平台叫什么、计划用
     /// 什么」的唯一来源，避免两处各写一份条件链而逐渐不一致。
     const fn platform_name() -> &'static str {
-        crate::platform::platform_identity::name()
+        crate::keystore::platform::platform_identity::name()
     }
 
     /// 计划中的后端名称，用于让调用方知道将来会用什么。
     const fn planned_backend() -> &'static str {
-        crate::platform::platform_identity::planned_backend()
+        crate::keystore::platform::platform_identity::planned_backend()
     }
 }
 
 /// 尚未实现后端的平台上的密钥库。
 ///
-/// 所有操作都返回 [`crate::KeyStoreError::UnsupportedPlatform`]。
+/// 所有操作都返回 [`crate::Error::UnsupportedPlatform`]。
 ///
 /// 类型名不叫 `UnsupportedKeyStore`，是因为将来它会被真实实现取代；调用方写的是
 /// [`super::PlatformKeyStore`] 这个别名，届时无需改动。
@@ -82,8 +82,8 @@ impl StubKeyStore {
     }
 
     /// 本平台尚未实现的错误。
-    fn unsupported() -> KeyStoreError {
-        KeyStoreError::UnsupportedPlatform {
+    fn unsupported() -> Error {
+        Error::UnsupportedPlatform {
             platform: StubProvider::platform_name(),
         }
     }
@@ -149,7 +149,7 @@ mod tests {
             store.delete("x"),
         ] {
             match result {
-                Err(KeyStoreError::UnsupportedPlatform { platform }) => {
+                Err(Error::UnsupportedPlatform { platform }) => {
                     assert!(!platform.is_empty(), "平台名不得为空");
                 }
                 other => panic!("期望 UnsupportedPlatform，实际是 {other:?}"),

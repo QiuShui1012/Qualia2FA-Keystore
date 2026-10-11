@@ -54,11 +54,11 @@
 //! **无法列出已有密钥。** 详见下方 `KEY_NAME_PREFIX` 附近对 `NCryptEnumKeys`
 //! 的说明——那是一个实测结论，不是「暂时没实现」。
 
-use crate::error::{KeyStoreError, Result};
-use crate::traits::{
+use crate::device::{DevicePublicKey, DeviceSignature};
+use crate::keystore::traits::{
     Backend, DIGEST_LEN, DeviceKeyStore, DeviceSigner, public_key_from_sec1, signature_from_raw,
 };
-use qualia2fa_core::{DevicePublicKey, DeviceSignature};
+use crate::{Error, Result};
 use std::fmt;
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ECCPUBLIC_BLOB, MS_KEY_STORAGE_PROVIDER, MS_PLATFORM_CRYPTO_PROVIDER,
@@ -148,12 +148,12 @@ const MAX_LABEL_LEN: usize = 128;
 /// 而不是黑名单：将来发现新的危险字符时，黑名单会漏，白名单不会。
 fn key_name(label: &str) -> Result<Vec<u16>> {
     if label.is_empty() {
-        return Err(KeyStoreError::InvalidKeyLabel {
+        return Err(Error::InvalidKeyLabel {
             reason: "标签为空"
         });
     }
     if label.len() > MAX_LABEL_LEN {
-        return Err(KeyStoreError::InvalidKeyLabel {
+        return Err(Error::InvalidKeyLabel {
             reason: "标签过长（上限 128 字节）",
         });
     }
@@ -161,7 +161,7 @@ fn key_name(label: &str) -> Result<Vec<u16>> {
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
-        return Err(KeyStoreError::InvalidKeyLabel {
+        return Err(Error::InvalidKeyLabel {
             reason: "标签含非法字符（只允许 ASCII 字母、数字、- _ .）",
         });
     }
@@ -225,7 +225,7 @@ fn open_provider(provider: *const u16) -> Result<CngHandle> {
     // 以 NUL 结尾的静态宽字符串。
     let status = unsafe { NCryptOpenStorageProvider(&raw mut handle, provider, 0) };
     if status < 0 {
-        return Err(KeyStoreError::Hardware {
+        return Err(Error::Hardware {
             operation: "NCryptOpenStorageProvider",
             code: status,
         });
@@ -252,7 +252,7 @@ fn open_key(provider: &CngHandle, name: &[u16]) -> Result<Option<CngHandle>> {
         return Ok(None);
     }
     if status < 0 {
-        return Err(KeyStoreError::Hardware {
+        return Err(Error::Hardware {
             operation: "NCryptOpenKey",
             code: status,
         });
@@ -282,7 +282,7 @@ fn create_key(provider: &CngHandle, name: &[u16]) -> Result<Option<CngHandle>> {
         return Ok(None);
     }
     if status < 0 {
-        return Err(KeyStoreError::Hardware {
+        return Err(Error::Hardware {
             operation: "NCryptCreatePersistedKey",
             code: status,
         });
@@ -294,7 +294,7 @@ fn create_key(provider: &CngHandle, name: &[u16]) -> Result<Option<CngHandle>> {
     // SAFETY: `guarded` 持有有效句柄。
     let status = unsafe { NCryptFinalizeKey(guarded.raw, NCRYPT_SILENT_FLAG) };
     if status < 0 {
-        return Err(KeyStoreError::Hardware {
+        return Err(Error::Hardware {
             operation: "NCryptFinalizeKey",
             code: status,
         });
@@ -329,7 +329,7 @@ fn export_public_key(key: &CngHandle) -> Result<DevicePublicKey> {
         )
     };
     if status < 0 {
-        return Err(KeyStoreError::Hardware {
+        return Err(Error::Hardware {
             operation: "NCryptExportKey(查询长度)",
             code: status,
         });
@@ -337,7 +337,7 @@ fn export_public_key(key: &CngHandle) -> Result<DevicePublicKey> {
     // 防御：长度字段来自平台 API，正常情况下是 72。给一个荒谬的上限，避免因为
     // 平台异常而申请巨量内存。公钥最多也就几十字节。
     if needed > 1024 {
-        return Err(KeyStoreError::InvalidPublicKey {
+        return Err(Error::InvalidPublicKey {
             reason: "平台报告的公钥长度异常（超过 1024 字节）",
         });
     }
@@ -357,7 +357,7 @@ fn export_public_key(key: &CngHandle) -> Result<DevicePublicKey> {
         )
     };
     if status < 0 {
-        return Err(KeyStoreError::Hardware {
+        return Err(Error::Hardware {
             operation: "NCryptExportKey",
             code: status,
         });
@@ -366,19 +366,19 @@ fn export_public_key(key: &CngHandle) -> Result<DevicePublicKey> {
 
     // `BCRYPT_ECCKEY_BLOB`：{ dwMagic: u32, cbKey: u32 }，均为小端。
     if blob.len() < 8 {
-        return Err(KeyStoreError::InvalidPublicKey {
+        return Err(Error::InvalidPublicKey {
             reason: "平台返回的公钥块短于 8 字节的头",
         });
     }
     let cb_key = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize;
     let payload = &blob[8..];
     if payload.len() != cb_key * 2 {
-        return Err(KeyStoreError::InvalidPublicKey {
+        return Err(Error::InvalidPublicKey {
             reason: "平台返回的公钥载荷长度与 cbKey 不符",
         });
     }
     if cb_key != 32 {
-        return Err(KeyStoreError::InvalidPublicKey {
+        return Err(Error::InvalidPublicKey {
             reason: "平台返回的公钥不是 32 字节坐标（不是 P-256）",
         });
     }
@@ -397,7 +397,7 @@ fn export_public_key(key: &CngHandle) -> Result<DevicePublicKey> {
 /// [`DeviceSignature`] 的线格式，不需要任何转换。
 fn sign_digest_raw(key: &CngHandle, digest: &[u8]) -> Result<DeviceSignature> {
     if digest.len() != DIGEST_LEN {
-        return Err(KeyStoreError::InvalidDigestLength {
+        return Err(Error::InvalidDigestLength {
             expected: DIGEST_LEN,
             actual: digest.len(),
         });
@@ -418,13 +418,13 @@ fn sign_digest_raw(key: &CngHandle, digest: &[u8]) -> Result<DeviceSignature> {
         )
     };
     if status < 0 {
-        return Err(KeyStoreError::Hardware {
+        return Err(Error::Hardware {
             operation: "NCryptSignHash(查询长度)",
             code: status,
         });
     }
     if needed > 1024 {
-        return Err(KeyStoreError::InvalidSignatureLength {
+        return Err(Error::InvalidSignatureLength {
             expected: 64,
             actual: needed as usize,
         });
@@ -445,7 +445,7 @@ fn sign_digest_raw(key: &CngHandle, digest: &[u8]) -> Result<DeviceSignature> {
         )
     };
     if status < 0 {
-        return Err(KeyStoreError::Hardware {
+        return Err(Error::Hardware {
             operation: "NCryptSignHash",
             code: status,
         });
@@ -511,13 +511,13 @@ impl WindowsKeyStore {
     ///
     /// # 错误
     ///
-    /// 该提供程序在本机不可用时返回 [`KeyStoreError::HardwareUnavailable`]。
+    /// 该提供程序在本机不可用时返回 [`Error::HardwareUnavailable`]。
     pub fn open(preferred: WindowsProvider) -> Result<Self> {
         let provider = open_provider(preferred.provider_name()).map_err(|error| {
             // 打开失败通常意味着「这台机器上没有 TPM」或「被组策略禁用」，属于
             // 环境问题而不是我们的 bug，因此归类为 `HardwareUnavailable`，让 UI
             // 能给出「你的设备没有硬件密钥保护」这种有意义的提示。
-            KeyStoreError::HardwareUnavailable {
+            Error::HardwareUnavailable {
                 reason: format!("无法打开{}（{error}）", preferred.describe()),
             }
         })?;
@@ -542,7 +542,7 @@ impl WindowsKeyStore {
         match Self::open(WindowsProvider::Tpm) {
             Ok(store) => Ok(store),
             Err(tpm_error) => Self::open(WindowsProvider::Software).map_err(|software_error| {
-                KeyStoreError::HardwareUnavailable {
+                Error::HardwareUnavailable {
                     reason: format!(
                         "TPM 与软件密钥库都不可用（TPM: {tpm_error}；软件: {software_error}）"
                     ),
@@ -559,7 +559,7 @@ impl DeviceKeyStore for WindowsKeyStore {
 
     fn open(&self, label: &str) -> Result<Box<dyn DeviceSigner>> {
         let name = key_name(label)?;
-        let key = open_key(&self.provider, &name)?.ok_or_else(|| KeyStoreError::KeyNotFound {
+        let key = open_key(&self.provider, &name)?.ok_or_else(|| Error::KeyNotFound {
             label: label.to_string(),
         })?;
         Ok(Box::new(WindowsSigner::new(key, label, self.backend)?))
@@ -573,7 +573,7 @@ impl DeviceKeyStore for WindowsKeyStore {
         // 怎么知道「已存在」：先打开看看。这也顺带把「本方法只在确实不存在时才
         // 创建」这件事写成了代码而不是注释。
         if open_key(&self.provider, &name)?.is_some() {
-            return Err(KeyStoreError::KeyAlreadyExists {
+            return Err(Error::KeyAlreadyExists {
                 label: label.to_string(),
             });
         }
@@ -582,7 +582,7 @@ impl DeviceKeyStore for WindowsKeyStore {
             // 竞态：在我们「打开确认不存在」与「创建」之间，另一个进程抢先建好了。
             // 对 `create` 而言这仍然是「已存在」，如实报告。
             None => {
-                return Err(KeyStoreError::KeyAlreadyExists {
+                return Err(Error::KeyAlreadyExists {
                     label: label.to_string(),
                 });
             }
@@ -595,7 +595,7 @@ impl DeviceKeyStore for WindowsKeyStore {
         // 先确认存在，以便给出准确的 `KeyNotFound` 而不是静默成功。对「删一个不
         // 存在的东西」报错是有意义的：那通常意味着 label 拼错了。
         let Some(key) = open_key(&self.provider, &name)? else {
-            return Err(KeyStoreError::KeyNotFound {
+            return Err(Error::KeyNotFound {
                 label: label.to_string(),
             });
         };
@@ -607,7 +607,7 @@ impl DeviceKeyStore for WindowsKeyStore {
         let mut key = key;
         key.raw = 0;
         if status < 0 {
-            return Err(KeyStoreError::Hardware {
+            return Err(Error::Hardware {
                 operation: "NCryptDeleteKey",
                 code: status,
             });

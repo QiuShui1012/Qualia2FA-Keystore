@@ -26,8 +26,9 @@ ignore = [
 
 [licenses]
 version = 2
-# 本项目以 LGPL-3.0-or-later 发布。允许清单与 Core 保持一致——两边共用同一套
-# crypto 栈，清单不一致会导致「Core 能过、keystore 过不了」这种无意义的摩擦。
+# 本 crate 以 LGPL-3.0-or-later 发布，是一个**独立可复用**的库：任何需要「平台硬件里
+# 一对 P-256 身份密钥」的项目都能用它。因此允许清单按自己的依赖树给，而不是照抄
+# 某个下游——照抄会让下游换一个依赖时这里莫名其妙地过不了。
 #
 # 注意：**不包含** GPL-2.0-only / SSPL / BUSL 等与 LGPL-3.0 不兼容或非自由的许可证。
 allow = [
@@ -55,22 +56,13 @@ unused-allowed-license = "allow"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# 允许不带版本约束的 **path 依赖**。
-#
-# 理由是 `[dev-dependencies]` 里的**自引用**：`qualia2fa-keystore = { path = ".",
-# features = ["mock"] }`。它的作用是让 `cargo test` 自动启用 `mock` feature
-# （`cfg(test)` 不会启用任何 feature，否则 `mock` 模块的可选依赖 `p256` 会缺席）。
-# 对一份 path 依赖写版本号既无意义（它就在本地）也无法表达真实约束。
-#
-# 这个开关只放行 path 依赖；从 crates.io 引入 `foo = "*"` 仍然会被拒绝。
-allow-wildcard-paths = true
 
 # 明确禁止的 crate 及其理由。
 #
-# 与 Core 不同，这里的重点是**平台抽象层**而不是密码学实现：本 crate 需要的是
+# 这里的重点是**平台抽象层**而不是密码学实现：本 crate 需要的是
 # 「能进硬件、且私钥导不出来」，任何不符合这一点的方案都不该出现在依赖里。
 deny = [
-    # 已归档，见 Core 的 deny.toml。
+    # 已归档，见 `p256` crate 自身的说明。
     { name = "pqcrypto" },
     { name = "pqcrypto-kyber" },
     { name = "pqcrypto-dilithium" },

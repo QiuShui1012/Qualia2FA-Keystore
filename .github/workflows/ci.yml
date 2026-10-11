@@ -1,13 +1,14 @@
 name: CI
 
-# 说明：本仓库根目录是 `keystore/`（crate `qualia2fa-keystore`），所有 job 都在仓库根执行。
+# 说明：本仓库根目录即 crate 根（crate `qualia-dik`），所有 job 都在仓库根执行。
 #
-# 本 crate 的职责是「边界」而不是密码学逻辑，因此 CI 的重点与 Core 不同：
+# 本 crate 的职责是「设备身份」而不是协议逻辑，因此 CI 的重点与上层不同：
 #   1. 确认 Windows 后端**真的能编译**——`unsafe` 面与平台 API 的绑定只在这里
 #      才会被编译器检查，而它无法在 Linux 上验证
 #   2. 确认**非 Windows 平台也能构建**——各后端都由 `cfg` 收窄，写错一个条件
 #      会让别的平台编译失败，而那要到端侧构建时才发现，代价很高
-#   3. 确认 `mock` feature 组合可用——上层的测试依赖它
+#   3. 确认 mock feature 组合可用——上层的测试依赖它
+#   5. 确认文档示例在 mock 下真的能跑（cargo test --doc --features mock）
 #   4. 确认 MSRV 仍然成立
 
 on:
@@ -32,14 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 本仓库以 `path = "Core"` 依赖核心库。路径**不能**带 `../` 前缀——带前缀
-      # 的相对路径解析基准是外层仓库之上，本地恰好命中所以看不出问题，CI 上会
-      # 指向不存在的目录。
-      - name: 取出 qualia2fa-core（满足 path = "Core" 依赖）
-        uses: actions/checkout@v4
-        with:
-          repository: QiuShui1012/Qualia2FA-Core
-          path: Core
+
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -61,6 +55,12 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      # 文档示例里的后端是 `MockKeyStore`，而它只在 `mock` feature 下存在。
+      # 因此示例必须在**开启该 feature** 时才真的被编译——默认那次运行会跳过它，
+      # 于是「示例写错了」这件事在这里才暴露。
+      - name: cargo test --doc --features mock
+        run: cargo test --doc --features mock
+
   # ── 第二关：非 Windows 平台必须也能构建 ────────────────────────────────────
   # 各后端都由 `cfg` 收窄。这一关专门证明「在没有任何平台后端的机器上，本 crate
   # 仍然能编译并通过与硬件无关的测试」——包括 `mock` 后端与抽象层自身。
@@ -70,11 +70,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 取出 qualia2fa-core（满足 path = "Core" 依赖）
-        uses: actions/checkout@v4
-        with:
-          repository: QiuShui1012/Qualia2FA-Core
-          path: Core
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -94,11 +89,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 取出 qualia2fa-core（满足 path = "Core" 依赖）
-        uses: actions/checkout@v4
-        with:
-          repository: QiuShui1012/Qualia2FA-Core
-          path: Core
 
       # MSRV 用**真实工具链**验证，而不是相信 `rust-version` 字段。
       # Linux 上跑是为了省时间：MSRV 关心的是语言与依赖特性，与平台后端无关，
@@ -116,11 +106,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 取出 qualia2fa-core（满足 path = "Core" 依赖）
-        uses: actions/checkout@v4
-        with:
-          repository: QiuShui1012/Qualia2FA-Core
-          path: Core
 
       # 本 crate 直接持有平台密钥库句柄，多出来的依赖都是攻击面。
       - name: 安装 cargo-deny

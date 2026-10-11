@@ -27,8 +27,8 @@
 // 每个集成测试二进制都会各自包含本模块，未用到其中全部工具时不该报警告。
 #![allow(dead_code)]
 
-use qualia2fa_keystore::DeviceKeyStore;
-use qualia2fa_keystore::platform::{WindowsKeyStore, WindowsProvider};
+use qualia_dik::DeviceKeyStore;
+use qualia_dik::keystore::platform::{WindowsKeyStore, WindowsProvider};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 所有测试标签的公共前缀。
@@ -107,6 +107,6 @@ pub fn software_store() -> Option<WindowsKeyStore> {
 
 /// 断言两个密钥库报告的后端不同（用于区分 TPM 与软件路径）。
 #[must_use]
-pub fn backend_of(store: &WindowsKeyStore) -> qualia2fa_keystore::Backend {
+pub fn backend_of(store: &WindowsKeyStore) -> qualia_dik::Backend {
     store.backend()
 }

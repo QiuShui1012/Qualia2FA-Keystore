@@ -32,8 +32,8 @@
 /// 能保证**类型与调用顺序**都是对的。
 #[test]
 fn readme_usage_example_compiles_and_runs() {
-    use qualia2fa_keystore::DeviceKeyStore;
-    use qualia2fa_keystore::platform::{WindowsKeyStore, WindowsProvider};
+    use qualia_dik::DeviceKeyStore;
+    use qualia_dik::keystore::platform::{WindowsKeyStore, WindowsProvider};
 
     // README: `let store = WindowsKeyStore::open_best_available()?;`
     // 用显式的 TPM 打开，避免在 CI 上悄悄测到软件后端。
@@ -65,14 +65,14 @@ fn readme_usage_example_compiles_and_runs() {
     let message = b"\x07README example message";
     let signature = signer.sign(message).expect("签名");
 
-    // README: `qualia2fa_core::device::verify(...)?;`
-    qualia2fa_core::device::verify(signer.public_key(), message, &signature)
+    // README: `qualia_dik::device::verify(...)?;`
+    qualia_dik::device::verify(signer.public_key(), message, &signature)
         .expect("README 示例里的验签必须通过");
 
     // README: `sign_digest` 与 `sign` 的分工。
-    let digest = qualia2fa_keystore::traits::sha256(message);
+    let digest = qualia_dik::keystore::sha256(message);
     let signature2 = signer.sign_digest(&digest).expect("摘要签名");
-    qualia2fa_core::device::verify(signer.public_key(), message, &signature2)
+    qualia_dik::device::verify(signer.public_key(), message, &signature2)
         .expect("按摘要签名后，对消息的验签同样必须通过");
 
     // README 承诺：非法标签会被拒绝。
@@ -96,7 +96,7 @@ fn readme_usage_example_compiles_and_runs() {
 #[cfg(feature = "mock")]
 #[test]
 fn readme_mock_example_compiles_and_runs() {
-    use qualia2fa_keystore::{DeviceKeyStore, MockKeyStore};
+    use qualia_dik::{DeviceKeyStore, MockKeyStore};
 
     // README: `let store = MockKeyStore::new();`
     let store = MockKeyStore::new();
@@ -105,5 +105,5 @@ fn readme_mock_example_compiles_and_runs() {
 
     let message = b"mock example";
     let signature = signer.sign(message).expect("签名");
-    qualia2fa_core::device::verify(signer.public_key(), message, &signature).expect("验签");
+    qualia_dik::device::verify(signer.public_key(), message, &signature).expect("验签");
 }

@@ -27,15 +27,15 @@
 //! 所以：**Core 拥有数据类型与验签**（那是纯逻辑），**本 crate 拥有 trait 与
 //! 实现**（那是平台相关）。方向是单向的：keystore → core。
 
-use crate::error::{KeyStoreError, Result};
-use qualia2fa_core::{DevicePublicKey, DeviceSignature};
+use crate::device::{DevicePublicKey, DeviceSignature};
+use crate::{Error, Result};
 
 /// 两个长度常量只被 `signature_from_raw` / `public_key_from_sec1` 用到，而那两个
 /// 函数只在「测试、`mock` feature、或 Windows 后端」之下编译。因此这里的 import
 /// 必须用**同一个** `cfg`，否则在 Linux/Android 的库构建里它是未使用的——
 /// 那会以 `-D warnings` 让 CI 直接失败，而本地在 Windows 上跑什么都看不见。
 #[cfg(any(test, feature = "mock", target_os = "windows"))]
-use qualia2fa_core::device::{PUBLIC_KEY_LEN, SIGNATURE_LEN};
+use crate::device::{PUBLIC_KEY_LEN, SIGNATURE_LEN};
 
 /// P-256 的摘要长度（SHA-256）。
 ///
@@ -137,7 +137,7 @@ pub trait DeviceSigner: core::fmt::Debug {
     /// # 签名的是消息，不是摘要
     ///
     /// 实现内部先做一次 SHA-256 再交给硬件，与
-    /// [`qualia2fa_core::device::verify`] 的约定一致——「谁负责哈希」这件事必须
+    /// [`crate::device::verify`] 的约定一致——「谁负责哈希」这件事必须
     /// 只有一种答案，否则验证会以「签名随机验不过」的形式失败。
     ///
     /// # 错误
@@ -158,7 +158,7 @@ pub trait DeviceSigner: core::fmt::Debug {
     /// # 错误
     ///
     /// 摘要长度不是 [`DIGEST_LEN`] 时返回
-    /// [`KeyStoreError::InvalidDigestLength`]。
+    /// [`Error::InvalidDigestLength`]。
     fn sign_digest(&self, digest: &[u8]) -> Result<DeviceSignature>;
 }
 
@@ -180,7 +180,7 @@ pub trait DeviceKeyStore: core::fmt::Debug {
     ///
     /// # 错误
     ///
-    /// 该 `label` 不存在时返回 [`KeyStoreError::KeyNotFound`]。**本方法不会创建
+    /// 该 `label` 不存在时返回 [`Error::KeyNotFound`]。**本方法不会创建
     /// 密钥**——创建与打开是两件事，混在一起的接口会让「我以为只是读一下」变成
     /// 悄悄生成了新身份。
     fn open(&self, label: &str) -> Result<Box<dyn DeviceSigner>>;
@@ -189,7 +189,7 @@ pub trait DeviceKeyStore: core::fmt::Debug {
     ///
     /// # 错误
     ///
-    /// `label` 已存在时返回 [`KeyStoreError::KeyNotFound`] 的对应变体
+    /// `label` 已存在时返回 [`Error::KeyNotFound`] 的对应变体
     /// （具体见各后端）。需要「有则打开、无则创建」时请用
     /// [`DeviceKeyStore::open_or_create`]。
     fn create(&self, label: &str) -> Result<Box<dyn DeviceSigner>>;
@@ -203,7 +203,7 @@ pub trait DeviceKeyStore: core::fmt::Debug {
     ///
     /// # 错误
     ///
-    /// `label` 不存在时返回 [`KeyStoreError::KeyNotFound`]。
+    /// `label` 不存在时返回 [`Error::KeyNotFound`]。
     fn delete(&self, label: &str) -> Result<()>;
 
     /// 打开 `label`；不存在则创建。
@@ -217,13 +217,13 @@ pub trait DeviceKeyStore: core::fmt::Debug {
     fn open_or_create(&self, label: &str) -> Result<Box<dyn DeviceSigner>> {
         match self.open(label) {
             Ok(signer) => Ok(signer),
-            Err(KeyStoreError::KeyNotFound { .. }) => match self.create(label) {
+            Err(Error::KeyNotFound { .. }) => match self.create(label) {
                 Ok(signer) => Ok(signer),
                 // 竞态：另一个进程在 open 与 create 之间抢先建好了。对
                 // `open_or_create` 而言这**正是想要的结果**，不是错误——回头打开
                 // 它即可。这也是 `create` 必须把「已存在」与其它失败区分开来的
                 // 原因：若它混在 `Hardware { .. }` 里，这里就只能笼统地失败。
-                Err(KeyStoreError::KeyAlreadyExists { .. }) => self.open(label),
+                Err(Error::KeyAlreadyExists { .. }) => self.open(label),
                 Err(other) => Err(other),
             },
             Err(other) => Err(other),
@@ -254,12 +254,13 @@ pub fn sha256(message: &[u8]) -> [u8; DIGEST_LEN] {
 #[cfg(any(test, feature = "mock", target_os = "windows"))]
 pub(crate) fn signature_from_raw(raw: &[u8]) -> Result<DeviceSignature> {
     if raw.len() != SIGNATURE_LEN {
-        return Err(KeyStoreError::InvalidSignatureLength {
+        return Err(Error::InvalidSignatureLength {
             expected: SIGNATURE_LEN,
             actual: raw.len(),
         });
     }
-    DeviceSignature::from_bytes(raw).map_err(|source| KeyStoreError::Core { source })
+    // 不再需要包一层：`device` 就在本 crate 里，它返回的就是本 crate 的 `Result`。
+    DeviceSignature::from_bytes(raw)
 }
 
 /// 把硬件给出的 SEC1 未压缩点转成 [`DevicePublicKey`]。
@@ -268,11 +269,12 @@ pub(crate) fn signature_from_raw(raw: &[u8]) -> Result<DeviceSignature> {
 #[cfg(any(test, feature = "mock", target_os = "windows"))]
 pub(crate) fn public_key_from_sec1(bytes: &[u8]) -> Result<DevicePublicKey> {
     if bytes.len() != PUBLIC_KEY_LEN {
-        return Err(KeyStoreError::InvalidPublicKey {
+        return Err(Error::InvalidPublicKey {
             reason: "长度不是 65 字节的 SEC1 未压缩点",
         });
     }
-    DevicePublicKey::from_sec1_bytes(bytes).map_err(|source| KeyStoreError::Core { source })
+    // 同上，不再需要包一层。
+    DevicePublicKey::from_sec1_bytes(bytes)
 }
 
 #[cfg(test)]

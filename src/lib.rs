@@ -13,29 +13,48 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! Qualia2FA 的平台硬件密钥库层。
+//! Device identity kit：设备身份的**公钥侧**，加上调用平台原生密钥库的**私钥侧**。
 //!
 //! # 这个 crate 为什么存在
 //!
-//! `qualia2fa-core` 有 `#![forbid(unsafe_code)]`，而调用平台原生 API（Windows
-//! CNG、Android Keystore、iOS Security framework）**必然**要 `unsafe`。本 crate
-//! 就是那道边界：它是整个项目里**唯一**允许出现 `unsafe` 的地方，也是唯一接触
-//! 平台原生 API 的地方。
+//! 两件事各自需要它：
 //!
-//! 它只做一件事，把三个动作封装成安全的 Rust 接口：
+//! 1. **调用平台原生 API 必然要 `unsafe`**（Windows CNG、Android Keystore、iOS
+//!    Security framework）。这个 crate 是那道边界：整个项目里**唯一**允许出现
+//!    `unsafe` 的地方，也是唯一接触平台原生 API 的地方。
+//! 2. **设备身份必须能在两个方向上被独立使用**：一台设备要能验证**别人**的签名，
+//!    而它自己可能根本不持有任何硬件密钥（桌面端没有 TPM 的机器就是这样）。把
+//!    「表示与验签」和「生成与签名」放进同一个 crate，才能让「公钥类型在哪」与
+//!    「谁来生成它」是同一个答案。
 //!
-//! 1. 在硬件里生成一个 ECDSA P-256 密钥（私钥永不导出）；
-//! 2. 取回对应的公钥；
-//! 3. 让硬件对一段消息签名。
+//! 因此本 crate 分成两半：
 //!
-//! **不要**把协议逻辑、密码学原语或任何能用纯 Rust 表达的东西放进这里——那些
-//! 属于 Core。放进来的东西就无法被 fuzz、无法在 CI 上跨平台跑，并且活在
-//! `forbid(unsafe_code)` 的保护之外。
+//! | 模块 | 做什么 | 持私钥吗 |
+//! |------|--------|----------|
+//! | [`device`] | 公钥表示、指纹（[`DeviceId`]）、验签 | 否 |
+//! | [`keystore`] | 生成密钥、取公钥、对消息签名 | 是（在硬件里） |
+//!
+//! 两半共用同一个错误类型 [`Error`]，因为调用方看到的是一次「设备身份操作」的失败，
+//! 而不是两个子系统的失败。
+//!
+//! # 它为什么**不依赖** Core
+//!
+//! 这是一个可独立复用的库：任何需要「平台硬件里的一对 P-256 身份密钥」的项目都能
+//! 用它，不需要接受 Qualia2FA 的保险库格式、同步协议或任何别的东西。因此它**不**
+//! 依赖下游，而是下游依赖它。放进来的东西必须对得起这个约束——协议逻辑、密码学
+//! 原语、任何能用纯 Rust 实现且与设备身份无关的东西都属于下游。
 //!
 //! # 为什么签名算法是 ECDSA P-256
 //!
-//! 见 `qualia2fa_core::device` 的模块文档：**P-256 是两个移动平台上唯一能进
-//! 硬件的签名算法**，这是强约束而不是偏好。本 crate 的所有后端都必须支持它。
+//! 这是一个**强约束，不是偏好**，因为私钥要放进平台硬件：
+//!
+//! - **Android**：KeyMint HAL 的 `Algorithm.aidl` 里只有 `RSA=1, EC=3, AES=32,
+//!   TRIPLE_DES=33, HMAC=128`——**没有 EdDSA**。注意 `CURVE_25519` 确实存在，但它是
+//!   **XDH 密钥协商曲线，不是签名算法**——这是二手资料里最常见的错误。
+//! - **iOS**：Apple 文档明确写着 Secure Enclave 只用 NIST P-256。
+//!
+//! 选 Ed25519 就等于接受「移动端身份密钥只能软件持有」——那必须是一个显式决定，
+//! 不能是事故。
 //!
 //! # 各平台后端
 //!
@@ -48,19 +67,57 @@
 //! | Android | Keystore / StrongBox | 未实现（占位后端）|
 //! | iOS | Secure Enclave | 未实现（占位后端）|
 //!
-//! 未实现的平台**不会静默降级**：调用 [`DeviceKeyStore::backend`] 得到的
-//! [`Backend::Unavailable`] 会如实反映出来，而创建密钥返回
-//! [`KeyStoreError::UnsupportedPlatform`]。静默降级到软件密钥是危险的——用户会
-//! 以为自己的私钥在硬件里，而实际不是。
+//! 未实现的平台**不会静默降级**：调用 [`keystore::DeviceKeyStore::backend`] 得到的
+//! [`keystore::Backend::Unavailable`] 会如实反映出来，而创建密钥返回
+//! [`Error::UnsupportedPlatform`]。静默降级到软件密钥是危险的——用户会以为自己的
+//! 私钥在硬件里，而实际不是。
 //!
-//! 「未实现」与「硬件不存在」是**两件不同的事**，因此用两个不同的值表达：
-//! 前者是 [`Backend::Unavailable`]（本平台还没有后端），后者是
-//! [`Backend::Software`]（有后端，但这台机器没有硬件）。合并它们会让「换个平台
-//! 就能用」与「换台机器就能用」在调用方看来一样。
+//! 「未实现」与「硬件不存在」是**两件不同的事**，因此用两个不同的值表达：前者是
+//! [`keystore::Backend::Unavailable`]（本平台还没有后端），后者是
+//! [`keystore::Backend::Software`]（有后端，但这台机器没有硬件）。合并它们会让
+//! 「换个平台就能用」与「换台机器就能用」在调用方看来一样。
 //!
 //! # 本 crate 不做 I/O、不读时钟、不读环境变量
 //!
 //! 唯一的例外是 `cfg` 与平台 API 自身。硬件句柄由密钥库对象持有，随其 drop 释放。
+//!
+//! # 示例
+//!
+//! 用内存后端跑一遍「生成 → 取公钥 → 签名 → 验签」：
+//!
+//! ```
+//! # #[cfg(feature = "mock")]
+//! # fn demo() -> Result<(), qualia_dik::Error> {
+//! use qualia_dik::{DeviceKeyStore, device};
+//! # use qualia_dik::MockKeyStore;
+//!
+//! let store = MockKeyStore::new();
+//! let signer = store.create("my-device")?;
+//!
+//! // 公钥不是秘密，可以随意传播。
+//! println!("设备 ID：{}", signer.public_key().device_id());
+//!
+//! let message = b"a message to sign";
+//! let signature = signer.sign(message)?;
+//!
+//! // 验签**不需要**密钥库，也不需要私钥——这是「公钥侧」独立存在的理由。
+//! device::verify(signer.public_key(), message, &signature)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! `MockKeyStore` 只在 `mock` feature 下存在——它在生产构建里是一条**不该有的**
+//! 「没有硬件保护」的路径，因此默认关闭。想在本地跑这段示例：
+//!
+//! ```console
+//! cargo test --doc --features mock
+//! ```
+//!
+//! 没有开启该 feature 时 `cargo test --doc` 照样通过（整段被 `cfg` 掉），因此
+//! CI 不需要为它单独配一次运行。
+//!
+//! 要在**不开启** `mock` 的情况下拿到本平台的真实后端，用
+//! [`keystore::PlatformKeyStore`]。
 
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
@@ -69,28 +126,17 @@
 // 操作都显式写在 `unsafe {}` 里，避免「整个函数是 unsafe 于是里面什么都敢写」。
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod device;
 mod error;
-pub mod traits;
+pub mod keystore;
 
-/// 平台后端。
-///
-/// 各平台后端放在这个独立模块里，而不是散在 crate 顶层：这样「平台相关代码的
-/// 总量」在目录结构上一目可见，审阅 `unsafe` 时不需要在无关文件之间翻找。
-///
-/// 声明成 `pub mod platform;`（对应 `src/platform.rs` + `src/platform/` 目录）
-/// 而不是在这里写内联的 `pub mod platform { ... }`：后者会与 `src/platform/`
-/// 目录**同时**被当作同一个模块名，导致里面的子模块找不到，报的却是
-/// 「could not find `windows` in `platform`」这种看不出真正原因的错。
-pub mod platform;
+pub use device::{DEVICE_ID_LEN, DeviceId, DevicePublicKey, DeviceSignature};
+pub use error::{Error, Result};
+
+pub use keystore::{Backend, DeviceKeyStore, DeviceSigner, KeyStoreError};
 
 #[cfg(any(test, feature = "mock"))]
-mod mock;
-
-pub use error::{KeyStoreError, Result};
-pub use traits::{Backend, DeviceKeyStore, DeviceSigner};
-
-#[cfg(any(test, feature = "mock"))]
-pub use mock::MockKeyStore;
+pub use keystore::MockKeyStore;
 
 /// 本平台是否有可用的硬件密钥库后端实现。
 ///
@@ -100,8 +146,9 @@ pub use mock::MockKeyStore;
 ///
 /// 想知道运行时真实情况，请用 [`DeviceKeyStore::backend`]。
 ///
-/// 目前只有 Windows 返回 `true`。未实现的平台上本函数返回 `false`，此时 [`platform::PlatformKeyStore`] 的每个
-/// 操作都会返回 [`KeyStoreError::UnsupportedPlatform`]——**不会**降级为软件密钥。
+/// 目前只有 Windows 返回 `true`。未实现的平台上本函数返回 `false`，此时
+/// [`keystore::PlatformKeyStore`] 的每个操作都会返回 [`Error::UnsupportedPlatform`]
+/// ——**不会**降级为软件密钥。
 #[must_use]
 pub const fn platform_backend_is_implemented() -> bool {
     cfg!(target_os = "windows")
