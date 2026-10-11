@@ -1,0 +1,88 @@
+[package]
+name = "qualia2fa-keystore"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "LGPL-3.0-or-later"
+description = "Qualia2FA 的平台硬件密钥库层：设备身份密钥对的生成、保管与签名"
+repository = "https://github.com/QiuShui1012/Qualia2FA-Keystore"
+publish = false
+
+# 这个 crate 是**唯一**允许出现 `unsafe` 的地方，也是唯一允许接触平台原生 API
+# （Windows CNG、Android Keystore……）的地方。
+#
+# 它存在的理由是让 `qualia2fa-core` 能保住 `#![forbid(unsafe_code)]`。因此**不要**
+# 把协议逻辑、密码学原语或任何可以纯 Rust 实现的东西放进来——那些属于 Core。
+# 这里只做一件事：把「在硬件里生成一个 P-256 密钥、让硬件对一段摘要签名、取回
+# 公钥」这三步封装成安全的 Rust 接口。
+#
+# `unsafe_code` 不 forbid 而是 deny 于**模块级**由各平台后端自行收窄（见
+# `src/windows.rs` 的 `#![deny(unsafe_op_in_unsafe_fn)]` 一类约束）。
+# 顶层不写 `#![forbid(unsafe_code)]`，因为平台 FFI 调用本质上就是 unsafe。
+
+[dependencies]
+qualia2fa-core = { path = "Core" }
+
+# SHA-256：硬件签名接口收的是**摘要**而不是消息（Windows CNG 的形参就叫
+# `pbHashValue`），所以「消息 → 摘要」这一步必须由我们做。
+#
+# 版本必须与 Core 的 `sha2` 一致（0.11），否则会出现两份 SHA-2。
+sha2 = "0.11"
+
+# OS CSPRNG。只被 `mock` 后端用来生成测试私钥；真实后端从不需要随机数——
+# 密钥是在 TPM / Secure Enclave 内部生成的，随机性由硬件负责。
+#
+# 不是可选依赖：`mock` 模块在 `cfg(test)` 下编译，而 `cfg(test)` 不会启用任何
+# feature，所以可选依赖在测试构建里会缺失。
+getrandom = "0.4.3"
+
+# 错误类型。与 Core 用同一个 major，避免出现两份 thiserror。
+thiserror = "2.0.21"
+
+# P-256 私钥运算，**只被 `mock` 后端使用**（签名器的纯软件实现）。真实后端不需要
+# 它：那边只有公钥解析与签名格式转换，属于 Core 的职责。
+#
+# 为什么是「可选依赖」而不是「开发依赖」：`mock` 既要在 `cfg(test)` 下编译，也要
+# 能被上层通过 `--features mock` 启用。开发依赖在后者里是看不见的——用开发依赖会
+# 让 `cargo check --features mock` 直接编译失败，而那种失败只在 CI 的 feature 组合
+# 检查里才会暴露。
+#
+# 版本必须是 0.14：0.13 依赖 `sha2 ^0.10`，会拖进第二份 SHA-2。
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"], optional = true }
+
+# Windows CNG（`NCrypt*`）。`windows-sys` 通过 `windows_link::link!` 直接声明
+# 导入库符号，因此**不需要** `LoadLibrary` / `GetProcAddress`，也不需要 `libloading`。
+#
+# 只启用 `Win32_Security_Cryptography`：它提供 NCrypt 与 BCrypt 的完整表面。
+# 不要启用其它 feature——`windows-sys` 的 feature 是逐模块开关的，多开会显著拉长
+# 编译时间。
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography"] }
+
+[features]
+# 把纯软件的内存密钥库暴露出来，供上层在自己的测试里使用。
+#
+# **默认不开启。** 开启它意味着生产构建里也存在一条「没有硬件保护」的路径，
+# 而那条路径看起来与真实路径毫无区别——把它变成必须显式选择的东西。
+mock = ["dep:p256"]
+
+[dev-dependencies]
+# **自引用**：让 `cfg(test)` 构建自动启用 `mock` feature。
+#
+# 为什么需要它：`p256` 是可选依赖，只在 `mock` 后端里用到，而 `cargo test` 不会
+# 自己启用任何 feature——它只编译 `--all-targets`。`mock` 模块虽然由
+# `cfg(any(test, feature = "mock"))` 在测试时被包含，但它的依赖不会跟着来，于是
+# 报 `cannot find module or crate p256`。
+#
+# 把本 crate 作为自己的开发依赖并开启 `mock`，会让测试构建里 feature 被统一打开。
+# 这比「把 p256 降级成永远存在的普通依赖」更好：后者会让生产构建也带着一份根本
+# 用不到的 P-256 私钥运算实现。
+qualia2fa-keystore = { path = ".", features = ["mock"] }
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+missing_docs_in_private_items = "warn"
+undocumented_unsafe_blocks = "deny"
