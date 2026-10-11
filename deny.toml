@@ -1,0 +1,100 @@
+# cargo-deny 配置。
+#
+# 本 crate 直接持有平台密钥库的句柄、并编译进 `unsafe` 的 FFI 调用，多出来的每一个
+# 依赖都是额外的攻击面。因此依赖审计在这里同样是安全控制，不是杂事。
+#
+# 参考：https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# 按目标平台分别评估依赖。平台后端的依赖（`windows-sys`）只在一个目标上生效，
+# 混在一起评估会把 Windows 专有依赖算到别的平台上。
+targets = [
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "aarch64-linux-android" },
+    { triple = "aarch64-apple-ios" },
+]
+# 开发依赖与可选 feature（`mock` 会拉进 `p256`）也要审：它们不进产物，但可能带着
+# 漏洞进 CI 环境。
+all-features = true
+
+[advisories]
+version = 2
+ignore = [
+    # 如有必须暂时接受的公告，在此列出并**附上理由与到期时间**，例如：
+    # { id = "RUSTSEC-0000-0000", reason = "无可利用路径，等上游 0.3.x 修复（复审：2026-12-31）" },
+]
+
+[licenses]
+version = 2
+# 本项目以 LGPL-3.0-or-later 发布。允许清单与 Core 保持一致——两边共用同一套
+# crypto 栈，清单不一致会导致「Core 能过、keystore 过不了」这种无意义的摩擦。
+#
+# 注意：**不包含** GPL-2.0-only / SSPL / BUSL 等与 LGPL-3.0 不兼容或非自由的许可证。
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "LGPL-3.0-or-later",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+# 白名单是**预先**为后续要引入的平台后端放行的，因此当前必然有一批许可证尚未被
+# 任何依赖用到。故把「白名单条目未命中」降级为允许，避免每次加依赖前都被噪音淹没。
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# 允许不带版本约束的 **path 依赖**。
+#
+# 理由是 `[dev-dependencies]` 里的**自引用**：`qualia2fa-keystore = { path = ".",
+# features = ["mock"] }`。它的作用是让 `cargo test` 自动启用 `mock` feature
+# （`cfg(test)` 不会启用任何 feature，否则 `mock` 模块的可选依赖 `p256` 会缺席）。
+# 对一份 path 依赖写版本号既无意义（它就在本地）也无法表达真实约束。
+#
+# 这个开关只放行 path 依赖；从 crates.io 引入 `foo = "*"` 仍然会被拒绝。
+allow-wildcard-paths = true
+
+# 明确禁止的 crate 及其理由。
+#
+# 与 Core 不同，这里的重点是**平台抽象层**而不是密码学实现：本 crate 需要的是
+# 「能进硬件、且私钥导不出来」，任何不符合这一点的方案都不该出现在依赖里。
+deny = [
+    # 已归档，见 Core 的 deny.toml。
+    { name = "pqcrypto" },
+    { name = "pqcrypto-kyber" },
+    { name = "pqcrypto-dilithium" },
+    { name = "pqc_kyber" },
+    { name = "cosmian_kyber" },
+    { name = "libcrux-kem" },
+    { name = "libcrux-aesgcm" },
+    # CPace：Rust 生态无可用实现。
+    { name = "cpace" },
+    { name = "pake-cpace" },
+    # 已并入 `aes`。
+    { name = "aes-soft" },
+    { name = "aesni" },
+    # `rand` 的默认线程 RNG（`ThreadRng`）不适合生成密钥材料——它不保证密码学
+    # 安全性，也不是跨平台一致的。本 crate 一律用 `getrandom` 直接向操作系统取
+    # 随机数，所以把 `rand` 挡在门外，免得有人图省事引入。
+    #
+    # 注意：`p256` 在本 crate 里只用于 `mock` 后端（纯软件签名），且刻意**不开**
+    # `arithmetic` / `rand_core` 相关 feature，因此它不会把 `rand` 拖进来。
+    { name = "rand" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
