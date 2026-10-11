@@ -9,6 +9,9 @@ repository = "https://github.com/Qualia2FA/QualiaDeviceIdentityKit"
 keywords = ["ecdsa", "p256", "keystore", "tpm", "identity"]
 categories = ["cryptography", "hardware-support"]
 readme = "README.md"
+# 发布包里不放 CI 配置与依赖审计清单：它们对使用者没有意义，
+# 而 crates.io 的包体大小与内容都是公开可见的。
+exclude = ["/.github", "/deny.toml"]
 
 # 这个 crate 是**唯一**允许出现 `unsafe` 的地方，也是唯一允许接触平台原生 API
 # （Windows CNG、Android Keystore……）的地方。
