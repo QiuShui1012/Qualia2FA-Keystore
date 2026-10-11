@@ -28,8 +28,14 @@
 //! 实现**（那是平台相关）。方向是单向的：keystore → core。
 
 use crate::error::{KeyStoreError, Result};
-use qualia2fa_core::device::{PUBLIC_KEY_LEN, SIGNATURE_LEN};
 use qualia2fa_core::{DevicePublicKey, DeviceSignature};
+
+/// 两个长度常量只被 `signature_from_raw` / `public_key_from_sec1` 用到，而那两个
+/// 函数只在「测试、`mock` feature、或 Windows 后端」之下编译。因此这里的 import
+/// 必须用**同一个** `cfg`，否则在 Linux/Android 的库构建里它是未使用的——
+/// 那会以 `-D warnings` 让 CI 直接失败，而本地在 Windows 上跑什么都看不见。
+#[cfg(any(test, feature = "mock", target_os = "windows"))]
+use qualia2fa_core::device::{PUBLIC_KEY_LEN, SIGNATURE_LEN};
 
 /// P-256 的摘要长度（SHA-256）。
 ///

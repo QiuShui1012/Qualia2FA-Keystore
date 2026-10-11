@@ -43,15 +43,20 @@
 //! |---|---|---|
 //! | Windows | CNG `NCrypt*`，TPM 2.0（`MS_PLATFORM_CRYPTO_PROVIDER`）| 已实现 |
 //! | Windows（无 TPM）| CNG 软件 KSP（`MS_KEY_STORAGE_PROVIDER`）| 已实现（降级）|
-//! | macOS | Secure Enclave | 未实现 |
-//! | Linux | TPM 2.0 | 未实现 |
-//! | Android | Keystore / StrongBox | 未实现 |
-//! | iOS | Secure Enclave | 未实现 |
+//! | macOS | Secure Enclave | 未实现（占位后端）|
+//! | Linux | TPM 2.0 | 未实现（占位后端）|
+//! | Android | Keystore / StrongBox | 未实现（占位后端）|
+//! | iOS | Secure Enclave | 未实现（占位后端）|
 //!
-//! 未实现的平台**不会静默降级**：调用 [`Backend`] 得到的
+//! 未实现的平台**不会静默降级**：调用 [`DeviceKeyStore::backend`] 得到的
 //! [`Backend::Unavailable`] 会如实反映出来，而创建密钥返回
 //! [`KeyStoreError::UnsupportedPlatform`]。静默降级到软件密钥是危险的——用户会
 //! 以为自己的私钥在硬件里，而实际不是。
+//!
+//! 「未实现」与「硬件不存在」是**两件不同的事**，因此用两个不同的值表达：
+//! 前者是 [`Backend::Unavailable`]（本平台还没有后端），后者是
+//! [`Backend::Software`]（有后端，但这台机器没有硬件）。合并它们会让「换个平台
+//! 就能用」与「换台机器就能用」在调用方看来一样。
 //!
 //! # 本 crate 不做 I/O、不读时钟、不读环境变量
 //!
@@ -95,7 +100,7 @@ pub use mock::MockKeyStore;
 ///
 /// 想知道运行时真实情况，请用 [`DeviceKeyStore::backend`]。
 ///
-/// 未实现的平台上本函数返回 `false`，此时 [`platform::PlatformKeyStore`] 的每个
+/// 目前只有 Windows 返回 `true`。未实现的平台上本函数返回 `false`，此时 [`platform::PlatformKeyStore`] 的每个
 /// 操作都会返回 [`KeyStoreError::UnsupportedPlatform`]——**不会**降级为软件密钥。
 #[must_use]
 pub const fn platform_backend_is_implemented() -> bool {

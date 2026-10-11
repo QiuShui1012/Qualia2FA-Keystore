@@ -15,7 +15,7 @@
 
 //! 尚未实现后端的平台上的回退实现。
 //!
-//! 本模块在 **除 Windows 之外的所有平台**上编译。它的每一个操作都返回
+//! 本模块在**除 Windows 之外的所有平台**上编译。它的每一个操作都返回
 //! [`crate::KeyStoreError::UnsupportedPlatform`]——**不提供任何密钥功能**。
 //!
 //! # 为什么要有这个模块，而不是干脆没有后端
@@ -50,34 +50,15 @@ pub struct StubProvider;
 impl StubProvider {
     /// 本平台名称，用于错误消息。
     ///
-    /// 返回固定字符串而不是运行期探测：这个值只用来告诉用户「哪个平台还没有
-    /// 后端」，而它本来就是编译期事实。
+    /// 转发到 [`crate::platform::platform_identity`]：那里是「平台叫什么、计划用
+    /// 什么」的唯一来源，避免两处各写一份条件链而逐渐不一致。
     const fn platform_name() -> &'static str {
-        if cfg!(target_os = "macos") {
-            "macOS"
-        } else if cfg!(target_os = "linux") {
-            "Linux"
-        } else if cfg!(target_os = "android") {
-            "Android"
-        } else if cfg!(target_os = "ios") {
-            "iOS"
-        } else {
-            // 未知平台（例如 BSD）。不必单独列名，报「本平台」即可。
-            "本平台"
-        }
+        crate::platform::platform_identity::name()
     }
 
     /// 计划中的后端名称，用于让调用方知道将来会用什么。
     const fn planned_backend() -> &'static str {
-        if cfg!(target_os = "macos") {
-            "Secure Enclave"
-        } else if cfg!(any(target_os = "linux", target_os = "android")) {
-            "TPM 2.0 / Keystore"
-        } else if cfg!(target_os = "ios") {
-            "Secure Enclave"
-        } else {
-            "未定"
-        }
+        crate::platform::platform_identity::planned_backend()
     }
 }
 
@@ -149,7 +130,7 @@ mod tests {
 
     /// 回退实现必须报告「不可用」，而不是「软件」或某个硬件后端。
     #[test]
-    fn fallback_reports_unavailable() {
+    fn stub_reports_unavailable() {
         let store = StubKeyStore::open_best_available();
         assert_eq!(store.backend(), Backend::Unavailable);
         assert!(!store.backend().is_hardware_backed());
