@@ -58,6 +58,10 @@ jobs:
     # 手动触发（workflow_dispatch）只跑验证，不发布。
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # `GITHUB_TOKEN` 默认是只读的，而最后那一步要建 Release。
+    # 显式声明最小权限：只需要写仓库内容，别的都不需要。
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -72,15 +76,26 @@ jobs:
         run: cargo publish --locked
 
       - name: Tag the published commit
-        # 发布成功之后才在 GitHub 上留下标记。顺序反过来的话，一次失败的发布会
-        # 留下一个指向「没有对应 crates.io 版本」的标签，而那个标签会被上面那条
-        # 版本一致性检查当成既有事实。
+        # `cargo publish` **已经成功**才走到这里（上一步失败会直接中止 job）。
+        #
+        # # 这一步刻意不写 `set -e`
+        #
+        # 发布是**不可撤销**的，因此「已经发到 crates.io、只是 GitHub Release 没建成」
+        # 绝不能让整个 job 变红——那会让人以为发布失败了。第一次跑就撞上这件事：
+        # `contents: write` 没声明，`gh release create` 报 403，job 红了，而 crate
+        # 其实已经上线。
+        #
+        # 因此这里把失败降级成一条**警告**，并且只影响「GitHub 上有没有那个 Release」
+        # 这一件纯装饰性的事。
         if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --notes "Published to crates.io as \`qualia-dik\`." \
-            --verify-tag
+          if gh release create "$GITHUB_REF_NAME" \
+               --title "$GITHUB_REF_NAME" \
+               --notes "Published to crates.io as \`qualia-dik\`." \
+               --verify-tag; then
+            echo "已创建 GitHub Release $GITHUB_REF_NAME"
+          else
+            echo "::warning::crate 已成功发布到 crates.io，但 GitHub Release 创建失败（通常是因为 workflow 缺少 contents: write 权限）。这不影响发布结果。"
+          fi
