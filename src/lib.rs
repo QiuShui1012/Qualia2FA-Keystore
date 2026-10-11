@@ -94,6 +94,9 @@ pub use mock::MockKeyStore;
 /// 密钥库），它回答的是「这个平台有没有实现」。
 ///
 /// 想知道运行时真实情况，请用 [`DeviceKeyStore::backend`]。
+///
+/// 未实现的平台上本函数返回 `false`，此时 [`platform::PlatformKeyStore`] 的每个
+/// 操作都会返回 [`KeyStoreError::UnsupportedPlatform`]——**不会**降级为软件密钥。
 #[must_use]
 pub const fn platform_backend_is_implemented() -> bool {
     cfg!(target_os = "windows")

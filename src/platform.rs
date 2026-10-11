@@ -22,19 +22,29 @@
 //!
 //! | 平台 | 后端 | 状态 |
 //! |---|---|---|
-//! | Windows | CNG `NCrypt*` + TPM 2.0 | `windows` |
-//! | Windows（无 TPM）| CNG 软件 KSP | `windows`（降级）|
-//! | macOS | Secure Enclave | 未实现 |
-//! | Linux | TPM 2.0 | 未实现 |
-//! | Android | Keystore / StrongBox | 未实现 |
-//! | iOS | Secure Enclave | 未实现 |
+//! | Windows | CNG `NCrypt*` + TPM 2.0 | **已实现并真机验证** |
+//! | Windows（无 TPM）| CNG 软件 KSP | 已实现（如实降级为 [`Backend::Software`]）|
+//! | macOS | Secure Enclave | 未实现（占用 [`crate::platform::PlatformKeyStore`] 的回退实现）|
+//! | Linux | TPM 2.0 | 未实现（同上）|
+//! | Android | Keystore / StrongBox | 未实现（同上）|
+//! | iOS | Secure Enclave | 未实现（同上）|
+//!
+//! # 只有一个入口：[`crate::platform::PlatformKeyStore`]
+//!
+//! 上层**不要**直接引用 [`crate::platform::WindowsKeyStore`] 之类的具体后端。请用
+//! [`crate::platform::PlatformKeyStore`]——它在每个平台上都指向该平台的后端，未实现的平台上指向
+//! `fallback::StubKeyStore`（所有操作返回 `UnsupportedPlatform`）。
+//!
+//! 这样做的目的是让 FFI 层与 UI 层**零分支**：平台差异只在本模块的一处 `cfg`
+//! 里，而不是散落在每一个调用点。
 //!
 //! # 新增一个平台后端时要做什么
 //!
 //! 1. 在此目录新建 `<平台>.rs`，在此处用 `#[cfg(target_os = "...")]` 声明。
 //! 2. 实现 [`crate::DeviceKeyStore`] 与 [`crate::DeviceSigner`]。
 //! 3. 确认该平台能提供 **P-256 ECDSA**——这是硬约束，理由见 crate 文档。
-//! 4. 在 [`crate::platform_backend_is_implemented`] 里加上这个平台。
+//! 4. 把 `PlatformKeyStore` 与 `PlatformProvider` 的 `cfg` 分支从
+//!    `platform/fallback.rs` 改到新模块，并更新 [`crate::platform_backend_is_implemented`]。
 //! 5. **不要**因为硬件不可用就悄悄退回软件密钥。返回 `UnsupportedPlatform` 或
 //!    `HardwareUnavailable`，让上层去征得用户同意。静默降级会让用户以为自己受
 //!    硬件保护，而实际不是。
@@ -50,10 +60,36 @@
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+/// 尚未实现后端的平台上的回退实现。
+///
+/// 在除 Windows 之外的所有平台上编译。它不提供任何密钥功能，每个操作都返回
+/// [`crate::KeyStoreError::UnsupportedPlatform`]。
+#[cfg(not(target_os = "windows"))]
+pub mod fallback;
+
+/// 当前平台上可用的密钥库实现（本平台尚未实现后端，见 `platform/fallback.rs`）。
+#[cfg(not(target_os = "windows"))]
+pub use fallback::StubKeyStore as PlatformKeyStore;
+/// 当前平台上可用的密钥库实现。
+///
+/// 这是**上层应当使用的入口**。它在每个平台上都存在，因而调用方无需为平台写
+/// 分支。
+#[cfg(target_os = "windows")]
+pub use windows::WindowsKeyStore as PlatformKeyStore;
+
+/// 当前平台上的存储提供程序（本平台尚未实现后端，见 `platform/fallback.rs`）。
+#[cfg(not(target_os = "windows"))]
+pub use fallback::StubProvider as PlatformProvider;
+/// 当前平台上的存储提供程序。
+#[cfg(target_os = "windows")]
+pub use windows::WindowsProvider as PlatformProvider;
+
 /// Windows 后端的主要类型。
 ///
 /// 在这里再导出，是为了让调用方只需要记住**一个**路径
 /// （`qualia2fa_keystore::platform::WindowsKeyStore`），而不必知道它具体放在哪个
-/// 子模块里。将来为别的平台加后端时，这个模块名保持稳定。
+/// 子模块里。
+///
+/// 新代码请优先用 [`crate::platform::PlatformKeyStore`]：它可移植，而本别名只在 Windows 上存在。
 #[cfg(target_os = "windows")]
 pub use windows::{WindowsKeyStore, WindowsProvider};
