@@ -13,75 +13,80 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! 尚未实现后端的平台上的回退实现。
+//! Fallback implementation for platforms whose backend is not implemented yet.
 //!
-//! 本模块在**除 Windows 之外的所有平台**上编译。它的每一个操作都返回
-//! [`crate::Error::UnsupportedPlatform`]——**不提供任何密钥功能**。
+//! This module compiles on **every platform except Windows**. Each of its operations
+//! returns [`crate::Error::UnsupportedPlatform`]: it provides **no key functionality at
+//! all**.
 //!
-//! # 为什么要有这个模块，而不是干脆没有后端
+//! # A backend that exists so that callers need no branches
 //!
-//! 因为它让**上层的代码不必为平台写分支**。`qualia_dik::keystore::platform::PlatformKeyStore`
-//! 在 Windows 上是真实实现、在其余平台上是本类型，两者满足同一组 trait。于是 FFI
-//! 层与 UI 层可以按 `cfg(target_os)` **零分支**地编译，所有平台差异都收在
-//! [`super`] 的一处 `cfg` 里。
+//! `qualia_dik::keystore::platform::PlatformKeyStore` is the real implementation on
+//! Windows and this type on every other platform, and both satisfy the same traits. The
+//! FFI and UI layers can therefore be built with **zero** `cfg(target_os)` branches: all
+//! platform differences are confined to a single `cfg` in [`super`] and none of them
+//! reaches a call site.
 //!
-//! # 为什么它必须失败，而不是降级为软件密钥
+//! # It fails instead of degrading to a software key
 //!
-//! 没有实现就是没有实现。在这里悄悄用软件密钥顶上，会让「本平台还没有硬件后端」
-//! 与「本平台有硬件后端且已在用」在调用方看来完全一样——那正是「静默降级」，
-//! 是本项目明确禁止的：用户会以为自己受硬件保护，而私钥其实只是一个软件文件。
+//! This type **never** substitutes a software key. Such a substitution would make "this
+//! platform has no hardware backend yet" look exactly like "this platform has a hardware
+//! backend and is using it", while the private key would in fact be an ordinary software
+//! file — the user would believe they are hardware-protected.
 //!
-//! 因此本类型**如实报告** [`crate::keystore::traits::Backend::Unavailable`]，并且永远不产出
-//! [`crate::DeviceSigner`]。上层拿到 `UnsupportedPlatform` 后应当提示用户
-//! 「本平台尚未支持设备身份」，而不是继续往下走。
+//! The type therefore reports [`crate::keystore::traits::Backend::Unavailable`] truthfully
+//! and never produces a [`crate::DeviceSigner`]. A caller that receives
+//! [`crate::Error::UnsupportedPlatform`] should tell the user that this platform does not
+//! support device identities yet rather than continue.
 
 use core::fmt;
 
 use crate::keystore::traits::{Backend, DeviceKeyStore};
 use crate::{Error, Result};
 
-/// 占位的存储提供程序。
+/// Placeholder storage provider.
 ///
-/// 存在的意义是让 `PlatformKeyStore` 的形状与 Windows 后端一致。它无法被构造出
-/// 一个可用的状态：所有操作都失败。
+/// It exists so that `PlatformKeyStore` has the same shape as the Windows backend. No
+/// usable state can be constructed from it: every operation fails.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StubProvider;
 
 impl StubProvider {
-    /// 本平台名称，用于错误消息。
+    /// Name of this platform, used in error messages.
     ///
-    /// 转发到 [`crate::keystore::platform::platform_identity`]：那里是「平台叫什么、计划用
-    /// 什么」的唯一来源，避免两处各写一份条件链而逐渐不一致。
+    /// Forwards to [`crate::keystore::platform::platform_identity`], the single source of
+    /// "what this platform is called and what it plans to use".
     const fn platform_name() -> &'static str {
         crate::keystore::platform::platform_identity::name()
     }
 
-    /// 计划中的后端名称，用于让调用方知道将来会用什么。
+    /// Name of the planned backend, so that callers know what will be used eventually.
     const fn planned_backend() -> &'static str {
         crate::keystore::platform::platform_identity::planned_backend()
     }
 }
 
-/// 尚未实现后端的平台上的密钥库。
+/// Key store on platforms whose backend is not implemented yet.
 ///
-/// 所有操作都返回 [`crate::Error::UnsupportedPlatform`]。
+/// Every operation returns [`crate::Error::UnsupportedPlatform`].
 ///
-/// 类型名不叫 `UnsupportedKeyStore`，是因为将来它会被真实实现取代；调用方写的是
-/// [`super::PlatformKeyStore`] 这个别名，届时无需改动。
+/// The type is not named `UnsupportedKeyStore` because callers refer to it through the
+/// alias [`super::PlatformKeyStore`], so a future real implementation replaces it without
+/// touching any call site.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StubKeyStore;
 
 impl StubKeyStore {
-    /// 构造一个回退密钥库。
+    /// Constructs the fallback key store.
     ///
-    /// 不需要参数：它没有任何状态。签名与 Windows 后端保持一致，调用方可以按
-    /// 同一个模式初始化。
+    /// It takes no arguments because it holds no state, and its signature matches the
+    /// Windows backend so that callers initialize both the same way.
     #[must_use]
     pub const fn open_best_available() -> Self {
         Self
     }
 
-    /// 本平台尚未实现的错误。
+    /// The error reporting that this platform's backend is not implemented yet.
     fn unsupported() -> Error {
         Error::UnsupportedPlatform {
             platform: StubProvider::platform_name(),
@@ -90,9 +95,10 @@ impl StubKeyStore {
 }
 
 impl DeviceKeyStore for StubKeyStore {
+    /// Always [`Backend::Unavailable`], never [`Backend::Software`]: this type offers no
+    /// software keys either, and reporting `Software` would send callers down a path that
+    /// is bound to fail.
     fn backend(&self) -> Backend {
-        // 如实报告。注意这**不是** `Backend::Software`——本类型连软件密钥都不提供，
-        // 报 `Software` 会让调用方以为「至少能用」，从而走进一条必然失败的路。
         Backend::Unavailable
     }
 
@@ -109,10 +115,10 @@ impl DeviceKeyStore for StubKeyStore {
     }
 }
 
-/// 供上层做诊断用的一段说明。
+/// A short explanation of the situation, for diagnostics.
 ///
-/// 放在这里而不是让每个调用方各写一遍，是因为「本平台还没有设备身份后端」这句话
-/// 应当只有一处措辞。
+/// It lives here so that "this platform has no device identity backend yet" has exactly
+/// one wording instead of one per caller.
 impl fmt::Display for StubKeyStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -128,7 +134,8 @@ impl fmt::Display for StubKeyStore {
 mod tests {
     use super::*;
 
-    /// 回退实现必须报告「不可用」，而不是「软件」或某个硬件后端。
+    /// The fallback must report "unavailable" rather than "software" or a hardware
+    /// backend.
     #[test]
     fn stub_reports_unavailable() {
         let store = StubKeyStore::open_best_available();
@@ -136,10 +143,11 @@ mod tests {
         assert!(!store.backend().is_hardware_backed());
     }
 
-    /// 每一个操作都必须失败，且错误是「本平台未支持」而不是别的。
+    /// Every operation must fail, and the error must be "this platform is not supported"
+    /// rather than anything else.
     ///
-    /// 这一条是防止将来有人往回退实现里加「临时的」软件密钥支持：只要它开始成功，
-    /// 这个测试就会失败。
+    /// A software-key fallback added to this type later would make the test fail, because
+    /// the operations would start succeeding.
     #[test]
     fn every_operation_fails_with_unsupported_platform() {
         let store = StubKeyStore::open_best_available();
@@ -157,14 +165,15 @@ mod tests {
         }
     }
 
-    /// `open_or_create` 也必须失败——它走的是 `open`，不得有捷径。
+    /// `open_or_create` must fail as well: it goes through `open` and takes no shortcut.
     #[test]
     fn open_or_create_also_fails() {
         let store = StubKeyStore::open_best_available();
         assert!(store.open_or_create("x").is_err());
     }
 
-    /// 诊断文案必须同时说清「哪个平台」与「还没实现」。
+    /// The diagnostic text must state both which platform this is and that the backend is
+    /// not implemented yet.
     #[test]
     fn display_explains_the_situation() {
         let store = StubKeyStore::open_best_available();

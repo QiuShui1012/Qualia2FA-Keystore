@@ -13,68 +13,63 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! 硬件密钥库的抽象接口。
+//! The hardware key store abstraction.
 //!
-//! # 为什么抽象层放在这个 crate，而不是 Core
-//!
-//! 把 trait 放在 Core 有两点坏处：
-//!
-//! 1. Core 会因此在概念上知道「平台」的存在，而它的价值恰恰在于**完全不知道**
-//!    自己跑在什么上面。
-//! 2. 平台后端要依赖 Core 的类型（`DevicePublicKey` 等），Core 又要定义被平台
-//!    后端实现的 trait，形成概念上的双向依赖。
-//!
-//! 所以：**Core 拥有数据类型与验签**（那是纯逻辑），**本 crate 拥有 trait 与
-//! 实现**（那是平台相关）。方向是单向的：keystore → core。
+//! The device data types and signature verification live in the core crate
+//! because they are pure logic; the traits and their platform implementations
+//! live here because they are platform specific. The dependency direction is one
+//! way: this crate depends on the core crate.
 
 use crate::device::{DevicePublicKey, DeviceSignature};
 use crate::{Error, Result};
 
-/// 两个长度常量只被 `signature_from_raw` / `public_key_from_sec1` 用到，而那两个
-/// 函数只在「测试、`mock` feature、或 Windows 后端」之下编译。因此这里的 import
-/// 必须用**同一个** `cfg`，否则在 Linux/Android 的库构建里它是未使用的——
-/// 那会以 `-D warnings` 让 CI 直接失败，而本地在 Windows 上跑什么都看不见。
+/// The two length constants are used only by `signature_from_raw` and
+/// `public_key_from_sec1`, which compile under the same `cfg` as this import.
+/// The two `cfg`s must stay identical: a library build for Linux or Android drops
+/// those functions, and an unused import fails the build under `-D warnings`.
 #[cfg(any(test, feature = "mock", target_os = "windows"))]
 use crate::device::{PUBLIC_KEY_LEN, SIGNATURE_LEN};
 
-/// P-256 的摘要长度（SHA-256）。
+/// Length of a P-256 digest (SHA-256), in bytes.
 ///
-/// 硬件签名接口（Windows CNG 的 `NCryptSignHash`、Android 的
-/// `Signature.update`）都接受**摘要**而不是消息。ECDSA 对 P-256 的标准配对哈希
-/// 就是 SHA-256，所以这个长度是曲线的属性，不是可配置项。
+/// Hardware signing interfaces take a digest, not a message (`NCryptSignHash` on
+/// Windows CNG, `Signature.update` on Android). SHA-256 is the standard pairing
+/// for ECDSA on P-256, so this length is a property of the curve rather than a
+/// configuration option.
 pub const DIGEST_LEN: usize = 32;
 
-/// 设备身份密钥所在的后端种类。
+/// The kind of backend that holds the device identity key.
 ///
-/// 这个值会被记进保险库并影响 UI 提示，所以要**稳定**：新增变体只能追加，不要
-/// 改变已有变体的含义。
+/// The value is recorded in the vault and shown in the UI, so it has to stay
+/// stable: new variants are appended, existing ones never change meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Backend {
-    /// 私钥在 TPM 2.0 内，无法导出。
+    /// The private key lives inside a TPM 2.0 and cannot be exported.
     Tpm,
-    /// 私钥在 macOS Secure Enclave 内，无法导出。
+    /// The private key lives inside the macOS Secure Enclave and cannot be exported.
     SecureEnclave,
-    /// 私钥在 Android Keystore / StrongBox 内，无法导出。
+    /// The private key lives inside the Android Keystore or StrongBox and cannot be exported.
     AndroidKeystore,
-    /// 私钥由操作系统软件密钥库保护（例如 Windows 软件 KSP）。
+    /// The private key is protected by an operating system software key store,
+    /// such as the Windows software KSP.
     ///
-    /// **私钥存在于软件中**，虽然通常仍受操作系统用户账户与 DPAPI 保护，但这
-    /// 不等于硬件保护：拥有管理员权限或能读取磁盘的攻击者可以把它取走。UI 应当
-    /// 在关键操作前如实告知用户。
+    /// The private key exists **in software**. It is normally still protected by
+    /// the user account and DPAPI, but that is not hardware protection: an
+    /// attacker with administrator rights or disk access can take it. The UI has
+    /// to tell the user before critical operations.
     Software,
-    /// 没有可用的后端。这个平台上要么没实现，要么硬件用不了。
+    /// No backend is available, either because this platform has no
+    /// implementation or because the hardware cannot be used.
     Unavailable,
 }
 
 impl Backend {
-    /// 私钥是否真的住在硬件里。
+    /// Whether the private key is held by hardware.
     ///
-    /// # 为什么这个方法值得存在
-    ///
-    /// 「密钥存在系统密钥库里」和「私钥无法离开硬件」是**两件不同的事**，而在
-    /// 用户看来它们长得一样。把区别做成一个显式的方法，让调用方必须主动声明
-    /// 自己要哪一种。
+    /// "The key is in the operating system key store" and "the private key cannot
+    /// leave hardware" look the same to a user but are different properties. This
+    /// method forces a caller to state which one it needs.
     #[must_use]
     pub const fn is_hardware_backed(self) -> bool {
         matches!(
@@ -83,10 +78,10 @@ impl Backend {
         )
     }
 
-    /// 适合放进 UI 或日志的稳定短名。
+    /// A stable short name for the UI and for logs.
     ///
-    /// 与 `Debug` 的区别：`Debug` 是实现细节，可以随重构变化；这个名字一旦用于
-    /// 持久化（例如写进保险库的元数据）就不能再改。
+    /// Unlike `Debug`, which is an implementation detail, this name may be
+    /// persisted (for example in vault metadata) and cannot change afterwards.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -99,130 +94,121 @@ impl Backend {
     }
 }
 
-/// 能对一段消息签名、并给出对应公钥的设备身份签名器。
+/// A device identity signer: it signs a message and reports the matching public key.
 ///
-/// # 为什么 trait 里没有「导出私钥」
+/// # There is no "export private key"
 ///
-/// 因为**那正是这个 trait 存在的意义**。私钥不可导出是硬件密钥库唯一的、也是最
-/// 重要的安全属性；一个能导出私钥的实现不满足这个接口的语义。若将来某个平台
-/// 真的需要导出（例如换成软件密钥），那必须是一个**不同的**类型，让调用方在
-/// 类型层面就看得见自己失去的东西。
+/// An implementation that can export the private key does not satisfy this
+/// interface, because a private key that cannot leave the platform is the point
+/// of a hardware key store. A platform that needs an exportable key gets a
+/// different type, so the caller sees in the type system what it gives up.
 ///
-/// # 为什么要求 `Debug`
+/// # `Debug` is required
 ///
-/// 一是诊断需要：出问题时能打印出「这是哪个后端、哪份身份」很关键。二是
-/// 可用性：没有它，`Result<Box<dyn DeviceSigner>, _>` 上的 `expect_err` 之类方法
-/// 无法使用，调用方会被迫写更啰嗦的代码，于是更少写测试。
+/// Diagnostics need it, and so does usability: helpers such as `expect_err` on a
+/// `Result<Box<dyn DeviceSigner>, _>` are unavailable without it. Implementations
+/// write `Debug` by hand instead of deriving it, because the type may hold
+/// platform handles or private key material; the implementations in this crate
+/// print only the backend kind and the device id.
 ///
-/// 各实现必须**自己**实现 `Debug` 而不是派生，因为内部可能持有平台句柄或私钥——
-/// 派生会不加区分地打印它们。本 crate 的所有实现都把输出限制在「后端种类 +
-/// 设备 ID」这类非秘密信息上。
+/// # Signing and public key lookup are separate methods
 ///
-/// # 为什么签名与公钥查询要分开
-///
-/// 公钥查询是纯读取，可能在锁屏状态下也能做；签名可能触发用户在场验证
-/// （Touch ID / Windows Hello）。把它们混在一个方法里，会让「只想读一下公钥」
-/// 也弹出认证框。
+/// Reading the public key is a pure read and may work while the device is locked;
+/// signing may require user presence (Touch ID, Windows Hello). A single method
+/// for both would raise the authentication prompt just to read a public key.
 pub trait DeviceSigner: core::fmt::Debug {
-    /// 这份身份所在的后端。
+    /// The backend that holds this identity.
     fn backend(&self) -> Backend;
 
-    /// 这份身份的 SEC1 未压缩公钥（65 字节）。
+    /// The SEC1 uncompressed public key of this identity (65 bytes).
     ///
-    /// 公钥不是秘密，可以自由传播、比较、写进日志。
+    /// The public key is not secret: it can be shared, compared and logged.
     fn public_key(&self) -> &DevicePublicKey;
 
-    /// 对一条消息签名，返回原始 `r||s`。
+    /// Signs a message and returns the raw `r||s`.
     ///
-    /// # 签名的是消息，不是摘要
+    /// The implementation hashes with SHA-256 first and hands the digest to the
+    /// hardware, matching the convention of [`crate::device::verify`].
     ///
-    /// 实现内部先做一次 SHA-256 再交给硬件，与
-    /// [`crate::device::verify`] 的约定一致——「谁负责哈希」这件事必须
-    /// 只有一种答案，否则验证会以「签名随机验不过」的形式失败。
+    /// # Errors
     ///
-    /// # 错误
-    ///
-    /// 硬件拒绝（例如用户取消了生物认证）、密钥被删除、后端不可用等。
+    /// Hardware refusal (a cancelled biometric prompt, for example), a deleted
+    /// key, or an unavailable backend.
     fn sign(&self, message: &[u8]) -> Result<DeviceSignature> {
         let digest = sha256(message);
         self.sign_digest(&digest)
     }
 
-    /// 对一段**已算好的** SHA-256 摘要签名，返回原始 `r||s`。
+    /// Signs an already computed SHA-256 digest and returns the raw `r||s`.
     ///
-    /// # 什么时候该用这个而不是 [`DeviceSigner::sign`]
+    /// Use it when the hash of the content already exists elsewhere, for example
+    /// in a protocol message that carries a digest. Most callers want
+    /// [`DeviceSigner::sign`].
     ///
-    /// 当待签内容的哈希**已经在别处算过**、再算一遍纯属浪费时。例如一个已经带
-    /// 着摘要的协议消息。绝大多数调用方应该用 [`DeviceSigner::sign`]。
+    /// # Errors
     ///
-    /// # 错误
-    ///
-    /// 摘要长度不是 [`DIGEST_LEN`] 时返回
-    /// [`Error::InvalidDigestLength`]。
+    /// [`Error::InvalidDigestLength`] when the digest is not [`DIGEST_LEN`] long.
     fn sign_digest(&self, digest: &[u8]) -> Result<DeviceSignature>;
 }
 
-/// 一份设备身份密钥对的持有者：能创建、打开、删除它。
+/// Holder of one device identity key pair: create it, open it, delete it.
 ///
-/// 与 [`DeviceSigner`] 分开的理由是生命周期不同：签名器代表「这一份身份」，而
-/// 密钥库代表「这台机器上所有身份」。UI 通常只需要前者。
+/// Separate from [`DeviceSigner`] because the lifetimes differ: a signer is one
+/// identity, while a key store is every identity on this machine. The UI usually
+/// needs only the former.
 pub trait DeviceKeyStore: core::fmt::Debug {
-    /// 这份密钥库实际使用的后端。
+    /// The backend this key store actually uses.
     ///
-    /// 这是**运行时**探测的结果，可能比编译期能力更弱：一台没有 TPM 的 Windows
-    /// 机器上会返回 [`Backend::Software`]；尚未实现的平台返回
-    /// [`Backend::Unavailable`]。
+    /// The value is probed at run time and may be weaker than what the platform
+    /// could provide: a Windows machine without a TPM reports
+    /// [`Backend::Software`], and a platform without an implementation reports
+    /// [`Backend::Unavailable`].
     fn backend(&self) -> Backend;
 
-    /// 用 `label` 打开已有的设备身份。
+    /// Opens the existing device identity stored under `label`.
     ///
-    /// 每个 `label` 对应一份独立的身份（例如不同账号用不同身份）。
+    /// Each label is an independent identity, for example one per account.
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// 该 `label` 不存在时返回 [`Error::KeyNotFound`]。**本方法不会创建
-    /// 密钥**——创建与打开是两件事，混在一起的接口会让「我以为只是读一下」变成
-    /// 悄悄生成了新身份。
+    /// [`Error::KeyNotFound`] when the label does not exist. This method never
+    /// creates a key: opening and creating are separate operations, and one that
+    /// did both would turn "I only wanted to read it" into a new identity.
     fn open(&self, label: &str) -> Result<Box<dyn DeviceSigner>>;
 
-    /// 用 `label` 创建设备身份。
+    /// Creates a device identity under `label`.
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// `label` 已存在时返回 [`Error::KeyNotFound`] 的对应变体
-    /// （具体见各后端）。需要「有则打开、无则创建」时请用
-    /// [`DeviceKeyStore::open_or_create`]。
+    /// The "already exists" variant of [`Error`] when the label is taken; the
+    /// exact variant is backend specific. Use [`DeviceKeyStore::open_or_create`]
+    /// for open-or-create semantics.
     fn create(&self, label: &str) -> Result<Box<dyn DeviceSigner>>;
 
-    /// 删除 `label` 对应的身份。
+    /// Deletes the identity stored under `label`.
     ///
-    /// # 警告
+    /// # Warning
     ///
-    /// 这会让该设备**永久无法再证明自己是原来的那台设备**。对方设备上记录的身份
-    /// 会变成无法验证的孤儿，需要重新配对。调用方必须先取得用户确认。
+    /// The device can never again prove that it is the same device. Identities
+    /// recorded on peer devices become unverifiable orphans and need a new
+    /// pairing, so the caller has to ask the user first.
     ///
-    /// # 错误
+    /// # Errors
     ///
-    /// `label` 不存在时返回 [`Error::KeyNotFound`]。
+    /// [`Error::KeyNotFound`] when the label does not exist.
     fn delete(&self, label: &str) -> Result<()>;
 
-    /// 打开 `label`；不存在则创建。
+    /// Opens `label`, creating it when it does not exist.
     ///
-    /// # 为什么这是默认方法而不是要求各后端各写一遍
-    ///
-    /// 「先开、失败再建」这个顺序里有一个**必须处理对**的竞态：在两个步骤之间，
-    /// 另一个进程可能刚好创建了同一个 `label`。此时创建会失败，而正确的反应是
-    /// **回头再打开一次**，不是把失败抛给用户。这个逻辑与平台无关，写在默认实现
-    /// 里，各后端就不会各漏一次。
+    /// The default implementation covers the race between the two steps: another
+    /// process may create the same label in between, and creating then fails with
+    /// an "already exists" error. For open-or-create that is the desired outcome,
+    /// so the key is opened again instead of reporting a failure.
     fn open_or_create(&self, label: &str) -> Result<Box<dyn DeviceSigner>> {
         match self.open(label) {
             Ok(signer) => Ok(signer),
             Err(Error::KeyNotFound { .. }) => match self.create(label) {
                 Ok(signer) => Ok(signer),
-                // 竞态：另一个进程在 open 与 create 之间抢先建好了。对
-                // `open_or_create` 而言这**正是想要的结果**，不是错误——回头打开
-                // 它即可。这也是 `create` 必须把「已存在」与其它失败区分开来的
-                // 原因：若它混在 `Hardware { .. }` 里，这里就只能笼统地失败。
                 Err(Error::KeyAlreadyExists { .. }) => self.open(label),
                 Err(other) => Err(other),
             },
@@ -231,10 +217,10 @@ pub trait DeviceKeyStore: core::fmt::Debug {
     }
 }
 
-/// 计算 SHA-256 摘要。
+/// Computes a SHA-256 digest.
 ///
-/// 独立成一个函数，是为了让「消息模式的哈希算法」只有一处定义——签名侧与验签侧
-/// 必须用同一个，而两处各写一遍正是最容易漂移的地方。
+/// A single definition of the hash used in message mode: signing and verification
+/// have to agree on it, and two copies would drift apart.
 #[must_use]
 pub fn sha256(message: &[u8]) -> [u8; DIGEST_LEN] {
     use sha2::{Digest, Sha256};
@@ -244,13 +230,14 @@ pub fn sha256(message: &[u8]) -> [u8; DIGEST_LEN] {
     out
 }
 
-/// 把硬件给出的原始 `r||s` 字节转成 [`DeviceSignature`]。
+/// Converts the raw `r||s` bytes returned by hardware into a [`DeviceSignature`].
 ///
-/// 长度不对时给出**明确的**错误，而不是截断或填充——硬件返回错误长度的签名说明
-/// 后端写错了，掩盖它只会让问题在后面以更难懂的形式出现。
+/// A wrong length is an error rather than a truncation or a padding: it means the
+/// backend is wrong, and hiding it only moves the problem somewhere harder to
+/// diagnose.
 ///
-/// 只在后端被编译时才有用（各后端目前都由 `cfg` 收窄），因此跟着一起收窄：
-/// 否则纯库构建会报「函数从未被使用」。
+/// Compiled only when a backend is, hence the same `cfg`; otherwise a library
+/// build reports an unused function.
 #[cfg(any(test, feature = "mock", target_os = "windows"))]
 pub(crate) fn signature_from_raw(raw: &[u8]) -> Result<DeviceSignature> {
     if raw.len() != SIGNATURE_LEN {
@@ -259,13 +246,13 @@ pub(crate) fn signature_from_raw(raw: &[u8]) -> Result<DeviceSignature> {
             actual: raw.len(),
         });
     }
-    // 不再需要包一层：`device` 就在本 crate 里，它返回的就是本 crate 的 `Result`。
     DeviceSignature::from_bytes(raw)
 }
 
-/// 把硬件给出的 SEC1 未压缩点转成 [`DevicePublicKey`]。
+/// Converts the SEC1 uncompressed point returned by hardware into a
+/// [`DevicePublicKey`].
 ///
-/// 收窄理由同 [`signature_from_raw`]。
+/// Compiled under the same `cfg` as [`signature_from_raw`].
 #[cfg(any(test, feature = "mock", target_os = "windows"))]
 pub(crate) fn public_key_from_sec1(bytes: &[u8]) -> Result<DevicePublicKey> {
     if bytes.len() != PUBLIC_KEY_LEN {
@@ -273,7 +260,6 @@ pub(crate) fn public_key_from_sec1(bytes: &[u8]) -> Result<DevicePublicKey> {
             reason: "长度不是 65 字节的 SEC1 未压缩点",
         });
     }
-    // 同上，不再需要包一层。
     DevicePublicKey::from_sec1_bytes(bytes)
 }
 
@@ -281,7 +267,7 @@ pub(crate) fn public_key_from_sec1(bytes: &[u8]) -> Result<DevicePublicKey> {
 mod tests {
     use super::*;
 
-    /// 只有真正硬件持有的后端才算 hardware-backed。
+    /// Only backends that really hold the key in hardware count as hardware-backed.
     #[test]
     fn hardware_backed_classification() {
         assert!(Backend::Tpm.is_hardware_backed());
@@ -291,7 +277,8 @@ mod tests {
         assert!(!Backend::Unavailable.is_hardware_backed());
     }
 
-    /// 持久化名必须稳定且互不相同——它们可能被写进保险库元数据。
+    /// The persisted names are unique and lower case, because they may be written
+    /// into vault metadata.
     #[test]
     fn backend_names_are_stable_and_unique() {
         let all = [
@@ -315,7 +302,7 @@ mod tests {
         }
     }
 
-    /// `sha256` 必须与已知向量一致（空串的 SHA-256）。
+    /// `sha256` matches the known vector for the empty input.
     #[test]
     fn sha256_matches_known_vector() {
         let digest = sha256(b"");
@@ -327,7 +314,7 @@ mod tests {
         assert_eq!(digest, expected);
     }
 
-    /// 摘要长度不符时必须报错，且不得截断或填充。
+    /// A wrong signature length is rejected, never truncated or padded.
     #[test]
     fn signature_from_raw_rejects_wrong_length() {
         assert!(signature_from_raw(&[]).is_err());
@@ -336,7 +323,7 @@ mod tests {
         assert!(signature_from_raw(&[0_u8; SIGNATURE_LEN]).is_ok());
     }
 
-    /// 公钥长度不符时必须报错。
+    /// A wrong public key length is rejected.
     #[test]
     fn public_key_from_sec1_rejects_wrong_length() {
         assert!(public_key_from_sec1(&[]).is_err());

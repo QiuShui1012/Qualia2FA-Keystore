@@ -13,31 +13,29 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! 纯软件的内存密钥库，**只用于测试**。
+//! An in-memory software key store, for tests only.
 //!
-//! # 它为什么必须存在
+//! It exists so that the protocol layer (registration, login, challenge-response)
+//! can be tested completely on CI and on machines without a TPM. Properties such
+//! as "a replay is rejected", "a forged public key is rejected" and "tampering is
+//! rejected" need repeated verification, and they would stay uncovered if the
+//! tests only ran on a developer machine with hardware.
 //!
-//! 协议层（注册、登录、挑战-应答）的逻辑必须能在 **CI 上、没有 TPM 的机器上**
-//! 被完整测试。若测试只能跑在有硬件的开发者机器上，那些最需要被反复验证的性质
-//! （重放被拒绝、伪造公钥被拒绝、篡改被拒绝）就会长期缺乏覆盖。
+//! It must never appear on a production path: its "hardware" is a `BTreeMap` and
+//! the private keys are ordinary bytes in memory, so a device identity built on it
+//! has no hardware protection while looking perfectly normal.
 //!
-//! # 它为什么绝不能出现在生产路径上
+//! Three properties keep it out of the way:
 //!
-//! 它的「硬件」就是一个 `HashMap`，私钥是普通内存里的字节。用它做真实设备
-//! 身份等于完全没有硬件保护，而且**看起来一切正常**——这是最危险的一类错误。
+//! - the module compiles only under `cfg(test)` or the explicit `mock` feature;
+//! - it reports [`Backend::Software`], and [`MockKeyStore::backend`] says so again
+//!   in its own documentation;
+//! - it keeps no persistence: keys live in the process only, so code that forgot
+//!   to swap the mock out fails right after a restart instead of running on with a
+//!   software key.
 //!
-//! 因此：
-//!
-//! - 本模块只在 `cfg(test)` 或显式开启 `mock` feature 时编译。
-//! - 它报告的后端是 [`Backend::Software`] **且** [`MockKeyStore::backend`] 的
-//!   文档反复强调它不是真实后端。
-//! - 它**不**实现持久化：密钥只活在进程内。这让任何「忘了换掉 mock」的代码在
-//!   重启后立刻暴露，而不是悄悄带着软件密钥一直跑下去。
-//!
-//! # 私钥的擦除
-//!
-//! 私钥用 `zeroize` 擦除。这与真实后端形成有趣对比：真实后端的私钥根本不在本
-//! 进程里，所以那边没有任何需要擦除的东西。
+//! Private keys are wiped with `zeroize` on drop. Real backends have nothing to
+//! wipe, because their private keys never enter this process.
 
 use crate::device::{DevicePublicKey, DeviceSignature};
 use crate::keystore::traits::{
@@ -48,20 +46,19 @@ use p256::ecdsa::{Signature, SigningKey, signature::hazmat::PrehashSigner};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// 内存里的软件密钥库，**仅用于测试**。
+/// An in-memory software key store, for tests only.
 ///
-/// 可以 `clone`，克隆出来的句柄**共享**同一份密钥存储——这模拟了真实密钥库
-/// 「同一台机器上多次打开看到同一批密钥」的行为，让「关闭再打开后身份不变」这类
-/// 性质可以被测到。
+/// Cloning shares the same key storage, which mirrors how a real key store shows
+/// the same keys to every handle on one machine, so properties such as "the
+/// identity survives closing and reopening" can be tested.
 #[derive(Clone, Default)]
 pub struct MockKeyStore {
-    /// 逻辑名 → 私钥。用 `Arc<Mutex<_>>` 以便克隆共享。
+    /// Logical name → private key, behind `Arc<Mutex<_>>` so clones share it.
     keys: Arc<Mutex<BTreeMap<String, SigningKey>>>,
 }
 
 impl core::fmt::Debug for MockKeyStore {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // **不打印私钥**，连长度都不打印。
         let count = self.keys.lock().map(|k| k.len()).unwrap_or(0);
         f.debug_struct("MockKeyStore")
             .field("key_count", &count)
@@ -70,7 +67,7 @@ impl core::fmt::Debug for MockKeyStore {
 }
 
 impl MockKeyStore {
-    /// 建一个空的软件密钥库。
+    /// Creates an empty software key store.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -78,12 +75,19 @@ impl MockKeyStore {
 }
 
 impl DeviceKeyStore for MockKeyStore {
+    /// Reports [`Backend::Software`].
+    ///
+    /// It never reports [`Backend::Tpm`]: a mock that looked like hardware would
+    /// send every branch on `backend()` down a different path in tests than in
+    /// production.
     fn backend(&self) -> Backend {
-        // 如实报告为软件。**不要**为了让测试「看起来像在测硬件」而返回 Tpm：
-        // 那会让任何依赖 backend() 的分支在测试里走到与生产不同的路径上。
         Backend::Software
     }
 
+    /// Opens an identity, or fails with [`Error::KeyNotFound`].
+    ///
+    /// The signer owns a copy of the private scalar, so signing never holds the
+    /// store's lock.
     fn open(&self, label: &str) -> Result<Box<dyn DeviceSigner>> {
         let keys = self.keys.lock().map_err(|_| Error::Hardware {
             operation: "MockKeyStore 内部锁中毒",
@@ -93,7 +97,6 @@ impl DeviceKeyStore for MockKeyStore {
             label: label.to_string(),
         })?;
 
-        // 复制一份标量出来，这样不持有锁也能签名。
         let bytes = signing.to_bytes();
         let owned = SigningKey::from_slice(&bytes).map_err(|_| Error::Hardware {
             operation: "MockKeyStore 私钥复制失败",
@@ -104,21 +107,22 @@ impl DeviceKeyStore for MockKeyStore {
         Ok(Box::new(MockSigner::new(owned, label)))
     }
 
+    /// Creates a key, or fails when the label is taken.
+    ///
+    /// An existing identity is never overwritten, matching the Windows backend: a
+    /// silent replacement would swap the device identity, which is the hardest
+    /// class of bug to diagnose.
     fn create(&self, label: &str) -> Result<Box<dyn DeviceSigner>> {
         let mut keys = self.keys.lock().map_err(|_| Error::Hardware {
             operation: "MockKeyStore 内部锁中毒",
             code: 0,
         })?;
         if keys.contains_key(label) {
-            // 与 Windows 后端保持一致：**绝不覆盖**已有身份。
-            // 覆盖会悄悄换掉设备身份，是最难排查的一类 bug。
             return Err(Error::Hardware {
                 operation: "MockKeyStore::create（同名密钥已存在，拒绝覆盖）",
                 code: 0,
             });
         }
-        // 用 OS CSPRNG 生成。`SigningKey::random` 需要 `rand_core` 的实现，
-        // 这里改用 `getrandom` 直接取 32 字节再规约——避免为一处测试引入 rand 生态。
         let signing = SigningKey::from_slice(&random_scalar()?).map_err(|_| Error::Hardware {
             operation: "MockKeyStore 生成标量失败",
             code: 0,
@@ -127,7 +131,6 @@ impl DeviceKeyStore for MockKeyStore {
         keys.insert(label.to_string(), signing);
         drop(keys);
 
-        // 与 Windows 后端一样，返回一个「打开」出来的签名器。
         let _ = public;
         self.open(label)
     }
@@ -146,10 +149,11 @@ impl DeviceKeyStore for MockKeyStore {
     }
 }
 
-/// 取 32 字节 OS 随机数作为私钥标量。
+/// Draws 32 bytes from the OS random source to use as a private scalar.
 ///
-/// `p256` 的 `from_slice` 会拒绝零与超出群阶的值；那种概率约 2^-128，但仍要
-/// 处理而不是 panic。
+/// `p256`'s `from_slice` rejects zero and values at or above the group order; that
+/// has probability around 2^-128 and still has to be handled rather than panicked
+/// on.
 fn random_scalar() -> Result<[u8; 32]> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| Error::Hardware {
@@ -159,25 +163,24 @@ fn random_scalar() -> Result<[u8; 32]> {
     Ok(bytes)
 }
 
-/// 从软件私钥导出 SEC1 未压缩公钥。
+/// Derives the SEC1 uncompressed public key from a software private key.
 fn public_key_from_signing(signing: &SigningKey) -> Result<DevicePublicKey> {
     let sec1 = signing.verifying_key().to_sec1_point(false);
     public_key_from_sec1(sec1.as_bytes())
 }
 
-/// 软件签名器。
+/// A software signer.
 pub struct MockSigner {
-    /// 软件私钥。**只存在于本结构内**，drop 时由 `zeroize` 擦除。
+    /// The software private key, wiped by `zeroize` on drop.
     signing: SigningKey,
-    /// 逻辑名。
+    /// The logical name of this identity.
     label: String,
-    /// 已导出的公钥。
+    /// The public key, derived once at construction.
     public_key: DevicePublicKey,
 }
 
 impl core::fmt::Debug for MockSigner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // **绝不打印私钥**。
         f.debug_struct("MockSigner")
             .field("label", &self.label)
             .field("device_id", &self.public_key.device_id())
@@ -186,14 +189,14 @@ impl core::fmt::Debug for MockSigner {
 }
 
 impl MockSigner {
-    /// 用一把软件私钥构造签名器。
+    /// Builds a signer around a software private key.
+    ///
+    /// A key generated here is never an invalid point, so the fallback of
+    /// [`unreachable_public_key`] is unreachable in practice; it exists because
+    /// the crate may not panic.
     fn new(signing: SigningKey, label: &str) -> Self {
-        let public_key = public_key_from_signing(&signing).unwrap_or_else(|_| {
-            // 我们自己生成的密钥不可能是非法点。若真发生了，说明 `p256` 与我们的
-            // 假设不一致——但库内不得 panic，所以退化成一个可辨认的占位实现。
-            // 实际上这条分支不可达；写成这样是为了满足「不 panic」的约束。
-            unreachable_public_key()
-        });
+        let public_key =
+            public_key_from_signing(&signing).unwrap_or_else(|_| unreachable_public_key());
         Self {
             signing,
             label: label.to_string(),
@@ -202,14 +205,14 @@ impl MockSigner {
     }
 }
 
-/// 「不可达」路径的占位公钥。
+/// Placeholder public key for the unreachable branch above.
 ///
-/// 用一个固定的、**确定不在 P-256 上**的点是不可能的（那正是 `from_sec1_bytes`
-/// 会拒绝的）。所以这里返回一个固定的合法点：生成元 `G` 的 SEC1 编码。它是合法
-/// 公钥，只是不对应我们的私钥——若真走到这里，签名会验不过，问题会立刻暴露，
-/// 而不是被掩盖。
+/// A fixed point that is *not* on P-256 cannot be used, since it is exactly what
+/// `from_sec1_bytes` rejects. This returns a valid fixed point instead — the SEC1
+/// encoding of the generator `G`. It parses, but it does not match our private
+/// key, so a signature made through this path fails verification immediately
+/// rather than hiding the problem.
 fn unreachable_public_key() -> DevicePublicKey {
-    // P-256 生成元的 SEC1 未压缩编码（FIPS 186-4 / SEC 2 标准值）。
     const GENERATOR: [u8; 65] = [
         0x04, 0x6B, 0x17, 0xD1, 0xF2, 0xE1, 0x2C, 0x42, 0x47, 0xF8, 0xBC, 0xE6, 0xE5, 0x63, 0xA4,
         0x40, 0xF2, 0x77, 0x03, 0x7D, 0x81, 0x2D, 0xEB, 0x33, 0xA0, 0xF4, 0xA1, 0x39, 0x45, 0xD8,
@@ -217,12 +220,8 @@ fn unreachable_public_key() -> DevicePublicKey {
         0x7C, 0x0F, 0x9E, 0x16, 0x2B, 0xCE, 0x33, 0x57, 0x6B, 0x31, 0x5E, 0xCE, 0xCB, 0xB6, 0x40,
         0x68, 0x37, 0xBF, 0x51, 0xF5,
     ];
-    public_key_from_sec1(&GENERATOR).unwrap_or_else(|_| {
-        // 连标准生成元都解析不了的话，`p256` 本身坏了。仍然不能 panic。
-        // 用一个自造的、必然合法的点：X=1 不行（不在曲线上），所以这里只能
-        // 再次依赖生成元。真到这一步，下面的 `expect` 会在测试里立刻暴露。
-        unreachable!("P-256 生成元无法解析，p256 实现已损坏")
-    })
+    public_key_from_sec1(&GENERATOR)
+        .unwrap_or_else(|_| unreachable!("P-256 生成元无法解析，p256 实现已损坏"))
 }
 
 impl DeviceSigner for MockSigner {
@@ -234,6 +233,8 @@ impl DeviceSigner for MockSigner {
         &self.public_key
     }
 
+    /// Signs a digest with the pre-hash interface, matching the hardware backends,
+    /// which also receive a digest.
     fn sign_digest(&self, digest: &[u8]) -> Result<DeviceSignature> {
         if digest.len() != DIGEST_LEN {
             return Err(Error::InvalidDigestLength {
@@ -241,7 +242,6 @@ impl DeviceSigner for MockSigner {
                 actual: digest.len(),
             });
         }
-        // 用预哈希签名接口，与硬件后端的行为对齐：硬件收到的也是摘要。
         let signature: Signature =
             self.signing
                 .sign_prehash(digest)
@@ -258,7 +258,7 @@ mod tests {
     use super::*;
     use crate::device;
 
-    /// 建了就能打开，且公钥一致。
+    /// What was created can be opened, and reports the same public key.
     #[test]
     fn create_then_open_yields_same_identity() {
         let store = MockKeyStore::new();
@@ -269,10 +269,10 @@ mod tests {
         assert_eq!(opened.public_key().device_id(), id_created);
     }
 
-    /// 打开不存在的密钥必须报 KeyNotFound，而**不是**顺手创建。
+    /// Opening a missing key reports `KeyNotFound` and creates nothing.
     ///
-    /// 「没有创建」这一半靠**再打开一次仍然失败**来验证：如果第一次 `open`
-    /// 顺手建了一个，第二次就会成功。
+    /// The second half is verified by opening again: if the first `open` had
+    /// created a key, the second call would succeed.
     #[test]
     fn open_missing_key_does_not_create() {
         let store = MockKeyStore::new();
@@ -284,7 +284,7 @@ mod tests {
         );
     }
 
-    /// 重复创建必须被拒绝，且**不改变**已有身份。
+    /// Creating an existing key is rejected and leaves the identity unchanged.
     #[test]
     fn create_existing_key_is_rejected_and_does_not_replace() {
         let store = MockKeyStore::new();
@@ -301,7 +301,7 @@ mod tests {
         );
     }
 
-    /// `open_or_create` 在两种情况下都工作。
+    /// `open_or_create` works on both paths.
     #[test]
     fn open_or_create_works_both_ways() {
         let store = MockKeyStore::new();
@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(a.public_key().device_id(), b.public_key().device_id());
     }
 
-    /// 克隆共享同一份存储（模拟同一台机器上的多次打开）。
+    /// Clones share one storage, which stands for reopening on the same machine.
     #[test]
     fn clone_shares_storage() {
         let store = MockKeyStore::new();
@@ -326,7 +326,8 @@ mod tests {
         );
     }
 
-    /// 软件签名的结果必须能被 Core 的验签函数接受。
+    /// A software signature is accepted by the verification function of the core
+    /// crate.
     #[test]
     fn software_signature_verifies_with_core() {
         let store = MockKeyStore::new();
@@ -339,7 +340,7 @@ mod tests {
         );
     }
 
-    /// 摘要长度不对必须报错。
+    /// A digest of the wrong length is rejected.
     #[test]
     fn wrong_digest_length_is_rejected() {
         let store = MockKeyStore::new();
@@ -350,7 +351,8 @@ mod tests {
         ));
     }
 
-    /// 删除之后打开必须失败，列表里也不再有它。
+    /// After deletion the identity cannot be opened, and deleting twice reports
+    /// `KeyNotFound`.
     #[test]
     fn delete_removes_identity() {
         let store = MockKeyStore::new();
@@ -359,14 +361,13 @@ mod tests {
 
         store.delete("device").expect("删除");
         assert!(store.open("device").is_err(), "删除后不应还能打开");
-        // 重复删除报 KeyNotFound。
         assert!(matches!(
             store.delete("device"),
             Err(Error::KeyNotFound { .. })
         ));
     }
 
-    /// 两个不同的 label 必须是两份独立身份。
+    /// Two labels are two independent identities.
     #[test]
     fn distinct_labels_are_distinct_identities() {
         let store = MockKeyStore::new();
@@ -375,7 +376,7 @@ mod tests {
         assert_ne!(a.public_key().device_id(), b.public_key().device_id());
     }
 
-    /// `backend()` 必须如实报告软件，不能伪装成硬件。
+    /// `backend()` reports software and never pretends to be hardware.
     #[test]
     fn mock_reports_software_backend() {
         let store = MockKeyStore::new();

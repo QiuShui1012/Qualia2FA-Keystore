@@ -13,75 +13,66 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! 确认 `README.md` 里的示例是**能编译**的。
+//! Confirms that the examples in `README.md` **compile**.
 //!
-//! # 为什么值得单独写一个测试
+//! The README examples are the first code a user sees, and rustdoc does not
+//! check them: rustdoc only compiles the code blocks inside doc comments. These
+//! are ordinary tests, so `cargo test` covers them without a separate
+//! `cargo test --doc` step.
 //!
-//! README 里的示例是使用者看到的第一段代码，而它**不会被 rustdoc 检查**
-//! （rustdoc 只测文档注释里的代码块）。一段编译不过的入门示例比没有示例更糟：
-//! 它会让人以为是自己环境有问题。
-//!
-//! 这里用 `cfg(test)` 而不是 rustdoc 的 `no_run`，是为了让它跟着 `cargo test`
-//! 一起跑，而不需要额外的 `cargo test --doc` 步骤。
+//! Prerequisites: Windows. The usage example opens the keystore explicitly with
+//! `WindowsProvider::Tpm` and skips with a printed message when no TPM is
+//! available; the `mock` example needs `--features mock`. Failure means a README
+//! example no longer compiles or no longer matches the API it documents.
 
 #![cfg(target_os = "windows")]
 
-/// README「用法」一节里的示例，逐行照抄。
+/// The example from the README "Usage" section, copied line by line.
 ///
-/// 唯一的差别是把 `?` 换成 `expect`，因为测试函数没有返回 `Result`。这样至少
-/// 能保证**类型与调用顺序**都是对的。
+/// The only difference is that `?` becomes `expect`, because the test function
+/// does not return a `Result`; the types and the call order are still checked.
+/// Requires a TPM: the store is opened with `WindowsProvider::Tpm` so that a
+/// software backend cannot be exercised silently. Failure means the documented
+/// usage no longer compiles or no longer runs.
 #[test]
 fn readme_usage_example_compiles_and_runs() {
     use qualia_dik::DeviceKeyStore;
     use qualia_dik::keystore::platform::{WindowsKeyStore, WindowsProvider};
 
-    // README: `let store = WindowsKeyStore::open_best_available()?;`
-    // 用显式的 TPM 打开，避免在 CI 上悄悄测到软件后端。
     let Ok(store) = WindowsKeyStore::open(WindowsProvider::Tpm) else {
         println!("跳过：本机没有可用的 TPM");
         return;
     };
 
-    // README: 如实告诉用户私钥在哪里。
-    // `is_hardware_backed` 必须存在且可用——这是 README 承诺的接口。
     assert!(
         store.backend().is_hardware_backed(),
         "用 TPM 提供程序打开的密钥库必须报告硬件保护"
     );
 
-    // README: `println!("设备 ID: {}", signer.public_key().device_id());`
-    // 用一个不会与真实身份冲突的标签。
     let label = format!("ReadmeExample-{}", std::process::id());
     let _ = store.delete(&label);
 
-    // README: `let signer = store.open_or_create("account-1")?;`
     let signer = store.open_or_create(&label).expect("打开或创建");
 
-    // README: 公钥不是秘密，可以随意传播。
     let device_id = signer.public_key().device_id().to_string();
     assert!(!device_id.is_empty(), "设备 ID 的字符串形式不应为空");
 
-    // README: `let signature = signer.sign(b"待签名的消息")?;`
     let message = b"\x07README example message";
     let signature = signer.sign(message).expect("签名");
 
-    // README: `qualia_dik::device::verify(...)?;`
     qualia_dik::device::verify(signer.public_key(), message, &signature)
         .expect("README 示例里的验签必须通过");
 
-    // README: `sign_digest` 与 `sign` 的分工。
     let digest = qualia_dik::keystore::sha256(message);
     let signature2 = signer.sign_digest(&digest).expect("摘要签名");
     qualia_dik::device::verify(signer.public_key(), message, &signature2)
         .expect("按摘要签名后，对消息的验签同样必须通过");
 
-    // README 承诺：非法标签会被拒绝。
     assert!(
         store.open_or_create("坏 标签").is_err(),
         "README 说 label 只允许 ASCII 字母数字与 - _ .，含空格的必须被拒绝"
     );
 
-    // README 承诺：`create` 不覆盖已有密钥。
     assert!(
         store.create(&label).is_err(),
         "README 说 create 不覆盖已有密钥"
@@ -90,17 +81,18 @@ fn readme_usage_example_compiles_and_runs() {
     store.delete(&label).expect("清理");
 }
 
-/// README 里 `mock` feature 的示例。
+/// The `mock` example from the README.
 ///
-/// 它由 `--features mock` 启用，因此这里用 `cfg` 收窄，避免默认测试找不到类型。
+/// It is gated behind the `mock` feature, which is what enables `MockKeyStore`;
+/// without `--features mock` it is compiled out, so the default test run does
+/// not look for a type that is not there. Requires no TPM. Failure means the
+/// documented `mock` example no longer compiles or no longer runs.
 #[cfg(feature = "mock")]
 #[test]
 fn readme_mock_example_compiles_and_runs() {
     use qualia_dik::{DeviceKeyStore, MockKeyStore};
 
-    // README: `let store = MockKeyStore::new();`
     let store = MockKeyStore::new();
-    // README: `let signer = store.create("test-device")?;`
     let signer = store.create("test-device").expect("创建");
 
     let message = b"mock example";

@@ -13,77 +13,81 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! Device identity kit：设备身份的**公钥侧**，加上调用平台原生密钥库的**私钥侧**。
+//! Device identity kit: the **public-key side** of a device identity, plus the
+//! **private-key side** that drives the platform-native key store.
 //!
-//! # 这个 crate 为什么存在
+//! # Scope
 //!
-//! 两件事各自需要它：
-//!
-//! 1. **调用平台原生 API 必然要 `unsafe`**（Windows CNG、Android Keystore、iOS
-//!    Security framework）。这个 crate 是那道边界：整个项目里**唯一**允许出现
-//!    `unsafe` 的地方，也是唯一接触平台原生 API 的地方。
-//! 2. **设备身份必须能在两个方向上被独立使用**：一台设备要能验证**别人**的签名，
-//!    而它自己可能根本不持有任何硬件密钥（桌面端没有 TPM 的机器就是这样）。把
-//!    「表示与验签」和「生成与签名」放进同一个 crate，才能让「公钥类型在哪」与
-//!    「谁来生成它」是同一个答案。
-//!
-//! 因此本 crate 分成两半：
-//!
-//! | 模块 | 做什么 | 持私钥吗 |
+//! | Module | Responsibility | Holds private keys |
 //! |------|--------|----------|
-//! | [`device`] | 公钥表示、指纹（[`DeviceId`]）、验签 | 否 |
-//! | [`keystore`] | 生成密钥、取公钥、对消息签名 | 是（在硬件里） |
+//! | [`device`] | Public-key representation, fingerprint ([`DeviceId`]), signature verification | No |
+//! | [`keystore`] | Key generation, public-key retrieval, message signing | Yes (in platform hardware) |
 //!
-//! 两半共用同一个错误类型 [`Error`]，因为调用方看到的是一次「设备身份操作」的失败，
-//! 而不是两个子系统的失败。
+//! Both halves share the single error type [`Error`]: the caller sees the failure of one
+//! device-identity operation, not the failure of two subsystems.
 //!
-//! # 它为什么**不依赖** Core
+//! This crate is the only place in the project where `unsafe` is allowed, and the only
+//! place that calls platform-native APIs (Windows CNG, Android Keystore, iOS Security
+//! framework). Every `unsafe` operation must be written explicitly inside an `unsafe {}`
+//! block; `#![deny(unsafe_op_in_unsafe_fn)]` enforces this.
 //!
-//! 这是一个可独立复用的库：任何需要「平台硬件里的一对 P-256 身份密钥」的项目都能
-//! 用它，不需要接受 Qualia2FA 的保险库格式、同步协议或任何别的东西。因此它**不**
-//! 依赖下游，而是下游依赖它。放进来的东西必须对得起这个约束——协议逻辑、密码学
-//! 原语、任何能用纯 Rust 实现且与设备身份无关的东西都属于下游。
+//! Representation and verification live in the same crate as generation and signing so that
+//! a device can verify **another** device's signature even if it holds no hardware key of
+//! its own — a desktop machine without a TPM, for example.
 //!
-//! # 为什么签名算法是 ECDSA P-256
+//! # A standalone library
 //!
-//! 这是一个**强约束，不是偏好**，因为私钥要放进平台硬件：
+//! Any project that needs a P-256 identity key pair held in platform hardware can use this
+//! crate without accepting the Qualia2FA vault format, the sync protocol, or anything else.
+//! Downstream crates depend on this one, never the reverse: protocol logic, cryptographic
+//! primitives, and anything else that can be written in pure Rust and is unrelated to device
+//! identity belongs downstream.
 //!
-//! - **Android**：KeyMint HAL 的 `Algorithm.aidl` 里只有 `RSA=1, EC=3, AES=32,
-//!   TRIPLE_DES=33, HMAC=128`——**没有 EdDSA**。注意 `CURVE_25519` 确实存在，但它是
-//!   **XDH 密钥协商曲线，不是签名算法**——这是二手资料里最常见的错误。
-//! - **iOS**：Apple 文档明确写着 Secure Enclave 只用 NIST P-256。
+//! # Signature algorithm: ECDSA P-256
 //!
-//! 选 Ed25519 就等于接受「移动端身份密钥只能软件持有」——那必须是一个显式决定，
-//! 不能是事故。
+//! The algorithm is a hard constraint rather than a preference, because the private key has
+//! to live in platform hardware:
 //!
-//! # 各平台后端
+//! - **Android**: KeyMint HAL's `Algorithm.aidl` lists only `RSA=1, EC=3, AES=32,
+//!   TRIPLE_DES=33, HMAC=128` — there is no EdDSA, and `KeyProperties.java` defines no
+//!   Ed25519 constant. `CURVE_25519` exists, but it is an **XDH key-agreement curve, not a
+//!   signature algorithm**.
+//! - **iOS**: Apple documents the Secure Enclave as NIST P-256 only.
 //!
-//! | 平台 | 后端 | 状态 |
+//! P-256/ECDSA is therefore the only signature algorithm that can be held in hardware on
+//! both mobile platforms; any other choice restricts mobile identity keys to software
+//! storage.
+//!
+//! # Platform backends
+//!
+//! | Platform | Backend | Status |
 //! |---|---|---|
-//! | Windows | CNG `NCrypt*`，TPM 2.0（`MS_PLATFORM_CRYPTO_PROVIDER`）| 已实现 |
-//! | Windows（无 TPM）| CNG 软件 KSP（`MS_KEY_STORAGE_PROVIDER`）| 已实现（降级）|
-//! | macOS | Secure Enclave | 未实现（占位后端）|
-//! | Linux | TPM 2.0 | 未实现（占位后端）|
-//! | Android | Keystore / StrongBox | 未实现（占位后端）|
-//! | iOS | Secure Enclave | 未实现（占位后端）|
+//! | Windows | CNG `NCrypt*`, TPM 2.0 (`MS_PLATFORM_CRYPTO_PROVIDER`) | Implemented |
+//! | Windows (no TPM) | CNG software KSP (`MS_KEY_STORAGE_PROVIDER`) | Implemented (fallback) |
+//! | macOS | Secure Enclave | Not implemented (placeholder backend) |
+//! | Linux | TPM 2.0 | Not implemented (placeholder backend) |
+//! | Android | Keystore / StrongBox | Not implemented (placeholder backend) |
+//! | iOS | Secure Enclave | Not implemented (placeholder backend) |
 //!
-//! 未实现的平台**不会静默降级**：调用 [`keystore::DeviceKeyStore::backend`] 得到的
-//! [`keystore::Backend::Unavailable`] 会如实反映出来，而创建密钥返回
-//! [`Error::UnsupportedPlatform`]。静默降级到软件密钥是危险的——用户会以为自己的
-//! 私钥在硬件里，而实际不是。
+//! Unimplemented platforms **never degrade silently**: calling
+//! [`keystore::DeviceKeyStore::backend`] yields [`keystore::Backend::Unavailable`], and key
+//! creation returns [`Error::UnsupportedPlatform`].
 //!
-//! 「未实现」与「硬件不存在」是**两件不同的事**，因此用两个不同的值表达：前者是
-//! [`keystore::Backend::Unavailable`]（本平台还没有后端），后者是
-//! [`keystore::Backend::Software`]（有后端，但这台机器没有硬件）。合并它们会让
-//! 「换个平台就能用」与「换台机器就能用」在调用方看来一样。
+//! "Not implemented" and "no hardware present" are two different things and have two
+//! different values: [`keystore::Backend::Unavailable`] means this platform has no backend
+//! yet, while [`keystore::Backend::Software`] means a backend exists but this machine has no
+//! hardware. Merging them would make "switch platform" and "switch machine"
+//! indistinguishable to callers.
 //!
-//! # 本 crate 不做 I/O、不读时钟、不读环境变量
+//! # I/O, clock, and environment
 //!
-//! 唯一的例外是 `cfg` 与平台 API 自身。硬件句柄由密钥库对象持有，随其 drop 释放。
+//! The crate performs no I/O, reads no clock, and reads no environment variables; the only
+//! exceptions are `cfg` and the platform APIs themselves. Hardware handles are owned by the
+//! key store object and released when it is dropped.
 //!
-//! # 示例
+//! # Example
 //!
-//! 用内存后端跑一遍「生成 → 取公钥 → 签名 → 验签」：
+//! Generate → read public key → sign → verify, using the in-memory backend:
 //!
 //! ```
 //! # #[cfg(feature = "mock")]
@@ -94,36 +98,36 @@
 //! let store = MockKeyStore::new();
 //! let signer = store.create("my-device")?;
 //!
-//! // 公钥不是秘密，可以随意传播。
 //! println!("设备 ID：{}", signer.public_key().device_id());
 //!
 //! let message = b"a message to sign";
 //! let signature = signer.sign(message)?;
 //!
-//! // 验签**不需要**密钥库，也不需要私钥——这是「公钥侧」独立存在的理由。
 //! device::verify(signer.public_key(), message, &signature)?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! `MockKeyStore` 只在 `mock` feature 下存在——它在生产构建里是一条**不该有的**
-//! 「没有硬件保护」的路径，因此默认关闭。想在本地跑这段示例：
+//! The public key is not a secret and may be propagated freely. Verification needs neither
+//! the key store nor the private key, which is what makes the public-key side usable on its
+//! own.
+//!
+//! `MockKeyStore` exists only under the `mock` feature: it is a path with no hardware
+//! protection and is therefore off by default in production builds. To run this example
+//! locally:
 //!
 //! ```console
 //! cargo test --doc --features mock
 //! ```
 //!
-//! 没有开启该 feature 时 `cargo test --doc` 照样通过（整段被 `cfg` 掉），因此
-//! CI 不需要为它单独配一次运行。
+//! Without that feature `cargo test --doc` still passes, because the whole example is
+//! compiled out by the `cfg`.
 //!
-//! 要在**不开启** `mock` 的情况下拿到本平台的真实后端，用
-//! [`keystore::PlatformKeyStore`]。
+//! To obtain the real backend of the current platform **without** enabling `mock`, use
+//! [`keystore::PlatformKeyStore`].
 
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
-// `unsafe` 只允许出现在平台后端里。顶层不开 `forbid(unsafe_code)`——平台 FFI
-// 调用本质上就是 unsafe——但用 `deny(unsafe_op_in_unsafe_fn)` 强制每个 unsafe
-// 操作都显式写在 `unsafe {}` 里，避免「整个函数是 unsafe 于是里面什么都敢写」。
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod device;
@@ -138,17 +142,18 @@ pub use keystore::{Backend, DeviceKeyStore, DeviceSigner, KeyStoreError};
 #[cfg(any(test, feature = "mock"))]
 pub use keystore::MockKeyStore;
 
-/// 本平台是否有可用的硬件密钥库后端实现。
+/// Whether this platform has an implemented hardware key store backend.
 ///
-/// 调用方（尤其是 UI）应当据此提示用户：没有硬件保护时，设备身份密钥会退化为
-/// 软件持有，安全性下降。**本函数不探测硬件是否真的可用**（那需要真的打开一次
-/// 密钥库），它回答的是「这个平台有没有实现」。
+/// Callers (UI in particular) can use this to tell the user that without hardware
+/// protection the device identity key is held in software, which lowers its security.
+/// **This function does not probe whether hardware is actually usable** — that would require
+/// opening a key store; it answers "does this platform have an implementation".
 ///
-/// 想知道运行时真实情况，请用 [`DeviceKeyStore::backend`]。
+/// For the runtime situation, use [`DeviceKeyStore::backend`].
 ///
-/// 目前只有 Windows 返回 `true`。未实现的平台上本函数返回 `false`，此时
-/// [`keystore::PlatformKeyStore`] 的每个操作都会返回 [`Error::UnsupportedPlatform`]
-/// ——**不会**降级为软件密钥。
+/// Only Windows returns `true` today. On unimplemented platforms the function returns
+/// `false`, and every operation of [`keystore::PlatformKeyStore`] returns
+/// [`Error::UnsupportedPlatform`] — there is **no** fallback to a software key.
 #[must_use]
 pub const fn platform_backend_is_implemented() -> bool {
     cfg!(target_os = "windows")

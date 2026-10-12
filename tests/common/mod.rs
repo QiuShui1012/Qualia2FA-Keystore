@@ -13,72 +13,77 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! 集成测试的共用工具。
+//! Shared helpers for the integration tests.
 //!
-//! # 为什么测试标签必须唯一
+//! Every integration test binary includes this module on its own, so helpers a
+//! given binary does not use are allowed to be dead code.
 //!
-//! `cargo test` 默认**并行**运行测试，而真实密钥库是全局共享状态。若两个测试用
-//! 同一个标签，它们会互相删除对方的密钥，表现为「随机失败」——那是最难查的一类
-//! 测试失败，而且会让人开始不信任测试结果。
+//! # Unique labels
 //!
-//! [`TestLabel`] 因此把「测试名 + 进程号 + 原子序号」拼进标签里，保证全局唯一。
+//! `cargo test` runs tests in parallel by default, and the platform keystore is
+//! global shared state: two tests that use the same label delete each other's
+//! keys, which shows up as intermittent failures. [`TestLabel`] therefore
+//! combines the test name, the process id, and an atomic sequence number into a
+//! label that is unique across the machine.
 
 #![cfg(target_os = "windows")]
-// 每个集成测试二进制都会各自包含本模块，未用到其中全部工具时不该报警告。
 #![allow(dead_code)]
 
 use qualia_dik::DeviceKeyStore;
 use qualia_dik::keystore::platform::{WindowsKeyStore, WindowsProvider};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// 所有测试标签的公共前缀。
+/// Common prefix of every test label.
 ///
-/// **不要**改掉它，也不要让测试用不带前缀的标签：真实用户身份与测试身份混在
-/// 同一个命名空间里时，一次误删就是用户永久丢失设备身份。
+/// Do **not** change it, and do not let a test use a label without it: test
+/// identities and real user identities live in one namespace, and deleting a
+/// real identity means the user loses the device identity permanently.
 const TEST_PREFIX: &str = "Q2faTest-";
 
-/// 进程内单调递增的序号，保证同一进程里的标签互不相同。
+/// Monotonically increasing per-process sequence number that keeps the labels
+/// of one process distinct.
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// 一个全局唯一的测试标签，drop 时**不做**任何事。
+/// A globally unique test label that does **nothing** on drop.
 ///
-/// 刻意不在 `Drop` 里自动清理：清理本身也要碰硬件，而它在 `panic` 展开期间执行
-/// 会掩盖真正的失败原因。测试自己显式调用 `delete`。
+/// Cleanup is deliberately not automatic: deleting a key touches hardware, and
+/// doing that while a panic unwinds would mask the actual failure. Tests call
+/// `delete` explicitly.
 #[derive(Debug)]
 pub struct TestLabel {
-    /// 完整的标签文本。
+    /// The full label text.
     text: String,
 }
 
 impl TestLabel {
-    /// 用 `name` 造一个全局唯一的标签。
+    /// Builds a globally unique label from `name`.
+    ///
+    /// `name` must contain only the characters `key_name` accepts: ASCII
+    /// letters, digits, `-`, `_`, and `.`.
     #[must_use]
     pub fn new(name: &str) -> Self {
         let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
         Self {
-            // 只保留 `key_name` 允许的字符：ASCII 字母、数字、`-`、`_`、`.`。
-            // `name` 由测试作者给出，含 `-` 是安全的。
             text: format!("{TEST_PREFIX}{name}-{pid}-{sequence}"),
         }
     }
 
-    /// 标签文本。
+    /// The label text.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.text
     }
 }
 
-/// 打开 TPM 后端；本机没有可用 TPM 时返回 `None` 并打印原因。
+/// Opens the TPM backend; returns `None` and prints the reason when this
+/// machine has no usable TPM.
 ///
-/// # 为什么是「返回 None」而不是「panic」
-///
-/// CI 跑在没有 TPM 的虚拟机上。若这些测试在那里失败，CI 会永远红着，于是没人
-/// 再看它——那比不测更糟。真正与硬件无关的性质由 `mock` 后端的单元测试覆盖。
-///
-/// 但**在开发机上**（有 TPM），这些测试必须真的跑起来。所以这里打印一行明确的
-/// 提示，让「跳过」与「通过」在输出里区分得开。
+/// Tests that need hardware must return early on `None` rather than fail: a
+/// machine without a TPM (including CI) then reports a skip, while a developer
+/// machine with a TPM really runs the tests. The printed reason keeps a skip
+/// distinguishable from a pass in the output. Properties that do not depend on
+/// hardware are covered through the `mock` backend instead.
 #[must_use]
 pub fn hardware_store() -> Option<WindowsKeyStore> {
     match WindowsKeyStore::open(WindowsProvider::Tpm) {
@@ -90,10 +95,11 @@ pub fn hardware_store() -> Option<WindowsKeyStore> {
     }
 }
 
-/// 打开软件 KSP 后端；连它都不可用时返回 `None`。
+/// Opens the software KSP backend; returns `None` when even that is
+/// unavailable.
 ///
-/// 软件 KSP 在 Windows 上始终存在，因此这个函数实际上总会成功——它让降级路径
-/// 也能被测试覆盖到。
+/// The software KSP always exists on Windows, so this normally succeeds: it
+/// lets the non-hardware path be covered on machines without a TPM too.
 #[must_use]
 pub fn software_store() -> Option<WindowsKeyStore> {
     match WindowsKeyStore::open(WindowsProvider::Software) {
@@ -105,7 +111,8 @@ pub fn software_store() -> Option<WindowsKeyStore> {
     }
 }
 
-/// 断言两个密钥库报告的后端不同（用于区分 TPM 与软件路径）。
+/// Returns the backend `store` reports, which tells the TPM and software paths
+/// apart.
 #[must_use]
 pub fn backend_of(store: &WindowsKeyStore) -> qualia_dik::Backend {
     store.backend()

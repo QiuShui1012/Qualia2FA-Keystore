@@ -13,96 +13,111 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library; if not, see <https://www.gnu.org/licenses/>.
 
-//! 各平台的硬件密钥库后端。
+//! Hardware key store backends, one module per platform.
 //!
-//! 每个平台一个模块。**只有当前目标平台的模块会真正提供实现**，其余平台落到
-//! `platform_stub`。
+//! **Only the module of the current target platform provides an implementation**; every
+//! other platform falls back to `platform_stub`.
 //!
-//! # 各平台的状态
+//! # Status per platform
 //!
-//! | 平台 | 后端 | 状态 |
+//! | Platform | Backend | Status |
 //! |---|---|---|
-//! | Windows | CNG `NCrypt*` + TPM 2.0 | **已实现并真机验证** |
-//! | Windows（无 TPM）| CNG 软件 KSP | 已实现（如实降级为 `Backend::Software`）|
-//! | macOS | Secure Enclave | **占位** |
-//! | Linux | TPM 2.0 | **占位** |
-//! | Android | Keystore / StrongBox | **占位** |
-//! | iOS | Secure Enclave | **占位** |
-//! | 其他（BSD 等）| 未定 | **占位** |
+//! | Windows | CNG `NCrypt*` + TPM 2.0 | **implemented and verified on real hardware** |
+//! | Windows (no TPM) | CNG software KSP | implemented (reports `Backend::Software`) |
+//! | macOS | Secure Enclave | **placeholder** |
+//! | Linux | TPM 2.0 | **placeholder** |
+//! | Android | Keystore / StrongBox | **placeholder** |
+//! | iOS | Secure Enclave | **placeholder** |
+//! | Other (BSD, …) | undecided | **placeholder** |
 //!
-//! 「占位」的含义是**每一个操作都失败**，而不是「有一个能用的软件实现」。理由见
-//! `platform_stub.rs` 的模块文档。
+//! "Placeholder" means **every operation fails**; it is not a usable software
+//! implementation. The exact failure behaviour is documented in the `platform_stub`
+//! module.
 //!
-//! # 只有一个入口：[`crate::keystore::platform::PlatformKeyStore`]
+//! # Single entry point: [`crate::keystore::platform::PlatformKeyStore`]
 //!
-//! 上层**不要**直接引用 [`crate::keystore::platform::WindowsKeyStore`] 之类的具体后端。请用
-//! [`crate::keystore::platform::PlatformKeyStore`]——它在每个平台上都存在，因而 FFI 层与 UI 层可以
-//! **零分支**编译。平台差异只在本文件的一处 `cfg` 里，而不是散落在每一个调用点。
+//! Upper layers must **not** reference a concrete backend such as
+//! `windows::WindowsKeyStore` directly. Use
+//! [`crate::keystore::platform::PlatformKeyStore`] instead: it exists on every platform,
+//! so the FFI and UI layers compile with **zero** platform branches. Platform differences
+//! are confined to the `cfg` attributes in this file rather than spread over every call
+//! site.
 //!
-//! # 新增一个平台后端时要做什么
+//! # Adding a platform backend
 //!
-//! 1. 在此目录新建 `<平台>.rs`，实现 [`crate::DeviceKeyStore`] 与
-//!    [`crate::DeviceSigner`]。
-//! 2. 把本文件里对应的那一行 `pub use platform_stub::StubKeyStore as PlatformKeyStore;`
-//!    改成指向新模块，并同步 `platform_backend_is_implemented`。
-//! 3. 确认该平台能提供 **P-256 ECDSA**——这是硬约束，理由见 crate 文档。
-//! 4. **不要**因为硬件不可用就悄悄退回软件密钥。返回 `UnsupportedPlatform` 或
-//!    `HardwareUnavailable`，让上层去征得用户同意。
+//! 1. Add `<platform>.rs` in this directory, implementing [`crate::DeviceKeyStore`] and
+//!    [`crate::DeviceSigner`].
+//! 2. Point the matching `pub use platform_stub::StubKeyStore as PlatformKeyStore;` line
+//!    in this file at the new module, and update `platform_backend_is_implemented`
+//!    accordingly.
+//! 3. Make sure the platform can provide **P-256 ECDSA**; this is a hard requirement, see
+//!    the crate documentation.
+//! 4. **Never** fall back to a software key because hardware is unavailable: return
+//!    `UnsupportedPlatform` or `HardwareUnavailable` so that the caller can ask the user.
 //!
-//! 各后端的公共要求：
+//! Requirements common to every backend:
 //!
-//! - 私钥**不得**离开硬件，也不得进入本进程的地址空间。
-//! - 签名接口收**摘要**、吐**原始 `r||s`**（64 字节），与
-//!   [`crate::keystore::traits::DIGEST_LEN`] 的约定一致。
-//! - 出错时返回 [`crate::KeyStoreError`]，**不得 panic**。
-//! - 每个 `unsafe` 块都要有 `// SAFETY:` 说明。
+//! - Private keys **must not** leave the hardware, nor enter this process's address
+//!   space.
+//! - The signing interface takes a **digest** and returns the raw **`r||s`** (64 bytes),
+//!   matching the convention of [`crate::keystore::traits::DIGEST_LEN`].
+//! - Failures are returned as [`crate::KeyStoreError`]; **no panics**.
+//! - Every `unsafe` block carries a `// SAFETY:` justification.
 
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-/// 尚未实现后端的平台上共用的占位实现。
+/// Placeholder implementation shared by all platforms without a backend.
 ///
-/// 在除 Windows 之外的所有平台上编译。「尚未实现」这件事对所有那些平台是同一件
-/// 事，因此只有一份实现；各平台**计划**用什么写在 [`platform_identity`] 里。
+/// Compiled on every platform except Windows. "Not implemented yet" is the same
+/// situation on all of them, hence a single implementation; what each platform *plans*
+/// to use is recorded in [`platform_identity`].
 #[cfg(not(target_os = "windows"))]
 pub mod platform_stub;
 
-/// 当前平台上可用的密钥库实现。
+/// The key store implementation available on the current platform.
 ///
-/// 这是**上层应当使用的入口**。它在每个平台上都存在，因而调用方无需为平台写分支。
+/// This is the **entry point upper layers should use**. It exists on every platform, so
+/// callers need no platform branches.
 #[cfg(target_os = "windows")]
 pub use windows::WindowsKeyStore as PlatformKeyStore;
 
-/// 当前平台上可用的密钥库实现（本平台后端尚未实现）。
+/// The key store implementation available on the current platform (this platform's
+/// backend is not implemented yet).
 #[cfg(not(target_os = "windows"))]
 pub use platform_stub::StubKeyStore as PlatformKeyStore;
 
-/// 当前平台上的存储提供程序。
+/// The storage provider of the current platform.
 #[cfg(target_os = "windows")]
 pub use windows::WindowsProvider as PlatformProvider;
 
-/// 当前平台上的存储提供程序（本平台后端尚未实现）。
+/// The storage provider of the current platform (this platform's backend is not
+/// implemented yet).
 #[cfg(not(target_os = "windows"))]
 pub use platform_stub::StubProvider as PlatformProvider;
 
-/// Windows 后端的主要类型。
+/// Main types of the Windows backend.
 ///
-/// 在这里再导出是为了让调用方只需记住**一个**路径
-/// （`qualia_dik::keystore::platform::WindowsKeyStore`），而不必知道它具体放在哪个
-/// 子模块里。
+/// Re-exported here so that callers only have to remember **one** path
+/// (`qualia_dik::keystore::platform::WindowsKeyStore`) instead of which submodule it
+/// lives in.
 ///
-/// 新代码请优先用 [`crate::keystore::platform::PlatformKeyStore`]：它可移植，而本别名只在 Windows 上存在。
+/// New code should prefer [`crate::keystore::platform::PlatformKeyStore`]: it is
+/// portable, whereas this alias only exists on Windows.
 #[cfg(target_os = "windows")]
 pub use windows::{WindowsKeyStore, WindowsProvider};
 
-/// 本平台叫什么，以及尚未实现的后端计划用什么。
+/// What this platform is called, and which backend it plans to use.
 ///
-/// 这两个值只用于**错误消息与诊断文案**，因此是编译期常量而不是运行期探测。
-/// 放在这里而不是塞进 `platform_stub.rs`，是为了让「每个平台各自的名字与计划」
-/// 在本文件里一眼可查——将来新增后端时该改哪里也是同一处。
+/// Both values appear only in **error messages and diagnostics**, so they are compile-time
+/// constants rather than runtime probes. They live here rather than in `platform_stub.rs`
+/// so that each platform's name and plan can be looked up in one place.
 #[cfg(not(target_os = "windows"))]
 pub mod platform_identity {
-    /// 本平台名称。
+    /// Name of this platform.
+    ///
+    /// Platforms not listed here (BSD, for example) report a generic name instead of a
+    /// dedicated one.
     #[must_use]
     pub const fn name() -> &'static str {
         if cfg!(target_os = "macos") {
@@ -114,25 +129,24 @@ pub mod platform_identity {
         } else if cfg!(target_os = "ios") {
             "iOS"
         } else {
-            // 未知平台（例如 BSD）。不必单独列名，报「本平台」即可。
             "本平台"
         }
     }
 
-    /// 计划中的后端。
+    /// Planned backend.
+    ///
+    /// macOS and iOS would use the Secure Enclave, which only supports NIST P-256. Linux
+    /// would use TPM 2.0, where the `tss-esapi` binding is available only under
+    /// `cfg(all(target_os = "linux", target_env = "gnu"))`, so musl targets need another
+    /// route. Android would use Keystore / StrongBox, where StrongBox requires API 28+, a
+    /// `FEATURE_STRONGBOX_KEYSTORE` check and a `StrongBoxUnavailableException` fallback.
     #[must_use]
     pub const fn planned_backend() -> &'static str {
         if cfg!(any(target_os = "macos", target_os = "ios")) {
-            // Secure Enclave 只支持 NIST P-256，这也正是本项目把设备身份签名
-            // 固定在 ECDSA P-256 的原因之一。
             "Secure Enclave"
         } else if cfg!(target_os = "linux") {
-            // `tss-esapi` 只在 `cfg(all(target_os = "linux", target_env = "gnu"))`
-            // 下可用，musl 目标需要另找路线。
             "TPM 2.0"
         } else if cfg!(target_os = "android") {
-            // API 28+ 才有 StrongBox，且需要 `FEATURE_STRONGBOX_KEYSTORE` 检查与
-            // `StrongBoxUnavailableException` 回退。
             "Keystore / StrongBox"
         } else {
             "未定"
