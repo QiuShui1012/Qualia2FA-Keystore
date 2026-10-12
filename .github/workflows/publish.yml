@@ -68,9 +68,27 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Check whether this version is already on crates.io
+        # A tag may be moved to a rewritten commit, and that push fires this
+        # workflow again. Publishing is irreversible, so the job has to treat
+        # "this version already exists" as nothing to do rather than as a
+        # failure. The tag was already checked against Cargo.toml in `verify`.
+        id: registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if curl -sf -o /dev/null "https://crates.io/api/v1/crates/qualia-dik/${version}"; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::qualia-dik ${version} is already published, skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish
         # 密钥来自仓库 secret，只在发布这一步注入——验证任务里用不到它，
         # 因此它不该出现在那些任务的运行环境里。
+        if: steps.registry.outputs.already != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_PUBLISH_KEY }}
         run: cargo publish --locked
