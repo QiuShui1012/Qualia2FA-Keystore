@@ -9,75 +9,87 @@ repository = "https://github.com/Qualia2FA/QualiaDeviceIdentityKit"
 keywords = ["ecdsa", "p256", "keystore", "tpm", "identity"]
 categories = ["cryptography", "hardware-support"]
 readme = "README.md"
-# 发布包里不放 CI 配置与依赖审计清单：它们对使用者没有意义，
-# 而 crates.io 的包体大小与内容都是公开可见的。
+# CI configuration and the dependency audit manifest are not part of the
+# published package: they are meaningless to users, and the size and contents of
+# a crates.io package are publicly visible.
 exclude = ["/.github", "/deny.toml"]
 
-# 这个 crate 是**唯一**允许出现 `unsafe` 的地方，也是唯一允许接触平台原生 API
-# （Windows CNG、Android Keystore……）的地方。
+# This crate is the **only** place where `unsafe` is allowed, and the only place
+# that may touch platform-native APIs (Windows CNG, Android Keystore, ...).
 #
-# 它只做两件事：
+# It does exactly two things:
 #
-# 1. **设备身份的公钥侧**（`src/device.rs`）：表示、指纹、验签。不持私钥、不签名。
-# 2. **调用平台密钥库**（`src/keystore.rs`）：生成密钥、取公钥、对消息签名。
+# 1. **Public half of the device identity** (`src/device.rs`): representation,
+#    fingerprint, verification. It holds no private key and does not sign.
+# 2. **Platform keystore calls** (`src/keystore.rs`): key generation, public key
+#    retrieval, message signing.
 #
-# 两件事放在一个 crate 里是因为它们是同一个概念的**两半**：设备身份。拆开会让
-# 「公钥类型在哪」与「谁来生成它」变成两个需要各自回答的问题，而任何用到其中一半的
-# 下游都不得不依赖两处。
+# Both halves live in one crate because they are the two halves of a single
+# concept, device identity.
 #
-# **不要**把协议逻辑或任何可以纯 Rust 实现、且与设备身份无关的东西放进来——那些
-# 属于下游应用。放进来的东西就无法被 fuzz、无法在 CI 上跨平台跑，并且活在
-# `forbid(unsafe_code)` 的保护之外。
+# **Do not** add protocol logic, or anything unrelated to device identity that
+# can be written in pure Rust: that belongs to a downstream application. Code
+# added here cannot be fuzzed, cannot run cross-platform in CI, and sits outside
+# the protection of `forbid(unsafe_code)`.
 #
-# `unsafe_code` 不 forbid 而是 deny 于**模块级**由各平台后端自行收窄（见
-# `src/keystore/platform/windows.rs`）。
-# 顶层不写 `#![forbid(unsafe_code)]`，因为平台 FFI 调用本质上就是 unsafe。
+# `unsafe_code` is `deny`, not `forbid`, and is narrowed per module by each
+# platform backend (see `src/keystore/platform/windows.rs`).
+# The crate root does not write `#![forbid(unsafe_code)]`, because platform FFI
+# calls are inherently unsafe.
 
 [dependencies]
-# P-256：公钥解析与验签（公钥侧），加上 `mock` 后端的软件签名器。
+# P-256: public key parsing and verification (public half), plus the software
+# signer used by the `mock` backend.
 #
-# `ecdsa` 提供 `VerifyingKey` / `Signature` / `Verifier`；`std` 让错误类型能实现
-# `std::error::Error`。
+# `ecdsa` provides `VerifyingKey` / `Signature` / `Verifier`; `std` lets the error
+# types implement `std::error::Error`.
 #
-# 版本必须是 0.14：0.13 依赖 `sha2 ^0.10`，会拖进第二份 SHA-2。同理它必须与下游的
-# `p256` 版本一致，否则一个二进制里会出现两条 P-256 实现。
+# The version must be 0.14: 0.13 depends on `sha2 ^0.10` and would pull in a
+# second copy of SHA-2. It must also match the downstream `p256` version,
+# otherwise one binary contains two P-256 implementations.
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 
-# SHA-256 有两个用途：算设备身份指纹，以及把「消息」变成硬件签名接口要的「摘要」
-# （Windows CNG 的形参就叫 `pbHashValue`）。
+# SHA-256 has two uses: computing the device identity fingerprint, and turning a
+# message into the digest the hardware signing API expects (the Windows CNG
+# parameter is named `pbHashValue`).
 sha2 = "0.11"
 
-# 错误类型。与下游用同一个 major，避免出现两份 thiserror。
+# Error types. Same major as downstream, to avoid two copies of thiserror.
 thiserror = "2.0.21"
 
-# OS CSPRNG。**只被 `mock` 后端**用来生成测试私钥——真实后端从不需要随机数：
-# 密钥是在 TPM / Secure Enclave 内部生成的，随机性由硬件负责。
+# OS CSPRNG. Used **only by the `mock` backend** to generate test private keys:
+# real backends never need randomness, because keys are generated inside the TPM
+# / Secure Enclave and the hardware supplies the entropy.
 #
-# 可选，因为生产构建不该带着它：没有这条路径时用户不会意外拿到一把软件密钥。
+# Optional, because a production build should not carry it: without this path a
+# user cannot accidentally end up with a software key.
 getrandom = { version = "0.4.3", optional = true }
 
-# Windows CNG（`NCrypt*`）。`windows-sys` 通过 `windows_link::link!` 直接声明
-# 导入库符号，因此**不需要** `LoadLibrary` / `GetProcAddress`，也不需要 `libloading`。
+# Windows CNG (`NCrypt*`). `windows-sys` declares the import library symbols
+# directly through `windows_link::link!`, so `LoadLibrary` / `GetProcAddress` are
+# **not** needed, and neither is `libloading`.
 #
-# 只启用 `Win32_Security_Cryptography`：它提供 NCrypt 与 BCrypt 的完整表面。
-# 不要启用其它 feature——`windows-sys` 的 feature 是逐模块开关的，多开会显著拉长
-# 编译时间。
+# Only `Win32_Security_Cryptography` is enabled: it provides the full NCrypt and
+# BCrypt surface. Do not enable other features -- `windows-sys` features are
+# per-module switches, and extra ones noticeably increase compile time.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography"] }
 
 [features]
-# 把纯软件的内存密钥库暴露出来，供上层在自己的测试里使用。
+# Exposes the pure software in-memory keystore so upper layers can use it in
+# their own tests.
 #
-# **默认不开启。** 开启它意味着生产构建里也存在一条「没有硬件保护」的路径，
-# 而那条路径看起来与真实路径毫无区别——把它变成必须显式选择的东西。
+# **Off by default.** Enabling it means a production build also carries a path
+# with no hardware protection, and that path looks no different from the real
+# one -- so it has to be an explicit choice.
 mock = ["dep:getrandom"]
 
 [dev-dependencies]
-# 让 `cfg(test)` 构建自动拿到与 `--features mock` 相同的依赖。
+# Gives `cfg(test)` builds the same dependency as `--features mock`.
 #
-# `mock` 模块由 `cfg(any(test, feature = "mock"))` 包含，因此在测试构建里它**总会**
-# 被编译——而它依赖的 `getrandom` 不会跟着来（`cargo test` 不启用任何 feature）。
-# 这里给它一条普通的开发依赖即可。
+# The `mock` module is included by `cfg(any(test, feature = "mock"))`, so it is
+# **always** compiled in a test build -- but its `getrandom` dependency does not
+# come along (`cargo test` enables no feature). A plain dev-dependency covers it.
 getrandom = "0.4.3"
 
 [lints.rust]

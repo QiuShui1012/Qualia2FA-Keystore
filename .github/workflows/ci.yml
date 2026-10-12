@@ -1,15 +1,20 @@
 name: CI
 
-# 说明：本仓库根目录即 crate 根（crate `qualia-dik`），所有 job 都在仓库根执行。
+# Note: the repository root is the crate root (crate `qualia-dik`), and every job
+# runs from the repository root.
 #
-# 本 crate 的职责是「设备身份」而不是协议逻辑，因此 CI 的重点与上层不同：
-#   1. 确认 Windows 后端**真的能编译**——`unsafe` 面与平台 API 的绑定只在这里
-#      才会被编译器检查，而它无法在 Linux 上验证
-#   2. 确认**非 Windows 平台也能构建**——各后端都由 `cfg` 收窄，写错一个条件
-#      会让别的平台编译失败，而那要到端侧构建时才发现，代价很高
-#   3. 确认 mock feature 组合可用——上层的测试依赖它
-#   5. 确认文档示例在 mock 下真的能跑（cargo test --doc --features mock）
-#   4. 确认 MSRV 仍然成立
+# This crate covers device identity rather than protocol logic, so CI focuses on
+# different things than the upper layers:
+#   1. confirming the Windows backend **really compiles** -- the `unsafe` surface
+#      and the platform API bindings are checked by the compiler only here, and
+#      they cannot be verified on Linux
+#   2. confirming **non-Windows platforms also build** -- each backend is narrowed
+#      by `cfg`, and one wrong condition breaks another platform's build, which
+#      only shows up during downstream builds at high cost
+#   3. confirming the mock feature combination works -- downstream tests rely on it
+#   5. confirming the documentation examples really run under mock
+#      (cargo test --doc --features mock)
+#   4. confirming the MSRV still holds
 
 on:
   push:
@@ -26,7 +31,7 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── 第一关：格式、lint、测试（Windows：唯一有后端实现的平台） ──────────────
+  # ── Job 1: fmt, lint, tests (Windows, the only platform with a backend) ─────
   check-windows:
     name: fmt + clippy + test（Windows）
     runs-on: windows-latest
@@ -38,15 +43,16 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      # 本 crate 是唯一允许 unsafe 的地方，而 CI 的 -D warnings 会把
-      # `undocumented_unsafe_blocks` 与 `unsafe_op_in_unsafe_fn` 上升为错误：
-      # 每个 unsafe 块都必须写明为什么它的不变式成立。
+      # This crate is the only place where unsafe is allowed, and CI's -D warnings
+      # turns `undocumented_unsafe_blocks` and `unsafe_op_in_unsafe_fn` into
+      # errors: every unsafe block must state why its invariants hold.
       - name: cargo clippy（-D warnings）
         run: cargo clippy --all-targets -- -D warnings
 
-      # 含真实 TPM 的集成测试。GitHub 的 Windows runner 通常**没有** TPM，
-      # 那些测试会打印原因并跳过而不是失败——所以这个 job 即使在无 TPM 的机器
-      # 上也是绿的，而「跳过」与「通过」在日志里区分得开。
+      # Integration tests that touch a real TPM. GitHub's Windows runners usually
+      # have **no** TPM; those tests print the reason and skip instead of failing,
+      # so this job is green even on a machine without a TPM, and "skipped" stays
+      # distinguishable from "passed" in the log.
       - name: cargo test
         run: cargo test --all-targets
 
@@ -55,15 +61,18 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      # 文档示例里的后端是 `MockKeyStore`，而它只在 `mock` feature 下存在。
-      # 因此示例必须在**开启该 feature** 时才真的被编译——默认那次运行会跳过它，
-      # 于是「示例写错了」这件事在这里才暴露。
+      # The backend in the documentation examples is `MockKeyStore`, which exists
+      # only under the `mock` feature. The examples are therefore only really
+      # compiled with that feature **enabled** -- the default run skips them, so
+      # "the example is broken" only shows up here.
       - name: cargo test --doc --features mock
         run: cargo test --doc --features mock
 
-  # ── 第二关：非 Windows 平台必须也能构建 ────────────────────────────────────
-  # 各后端都由 `cfg` 收窄。这一关专门证明「在没有任何平台后端的机器上，本 crate
-  # 仍然能编译并通过与硬件无关的测试」——包括 `mock` 后端与抽象层自身。
+  # ── Job 2: non-Windows platforms must build as well ─────────────────────────
+  # Each backend is narrowed by `cfg`. This job proves that on a machine with no
+  # platform backend at all, this crate still compiles and passes the
+  # hardware-independent tests -- including the `mock` backend and the
+  # abstraction layer itself.
   check-linux:
     name: 非 Windows 平台构建 + mock 后端测试（Linux）
     runs-on: ubuntu-latest
@@ -77,12 +86,13 @@ jobs:
       - name: cargo clippy（-D warnings）
         run: cargo clippy --all-targets -- -D warnings
 
-      # 在 Linux 上，`mock` 是**唯一**可用的后端。跑它既验证了抽象层可用，
-      # 也验证了 cfg 收窄没有把非 Windows 平台写坏。
+      # On Linux, `mock` is the **only** available backend. Running it verifies
+      # both that the abstraction layer works and that the `cfg` narrowing did not
+      # break non-Windows platforms.
       - name: cargo test --features mock
         run: cargo test --features mock --all-targets
 
-  # ── 第三关：MSRV ──────────────────────────────────────────────────────────
+  # ── Job 3: MSRV ─────────────────────────────────────────────────────────────
   msrv:
     name: MSRV 1.89
     runs-on: ubuntu-latest
@@ -90,16 +100,17 @@ jobs:
       - uses: actions/checkout@v4
 
 
-      # MSRV 用**真实工具链**验证，而不是相信 `rust-version` 字段。
-      # Linux 上跑是为了省时间：MSRV 关心的是语言与依赖特性，与平台后端无关，
-      # 而平台后端的编译由 Windows job 覆盖。
+      # The MSRV is verified with a **real toolchain**, rather than by trusting the
+      # `rust-version` field. It runs on Linux to save time: the MSRV concerns
+      # language and dependency features, not the platform backend, whose
+      # compilation the Windows job already covers.
       - name: 安装 1.89 工具链
         run: rustup toolchain install 1.89 --profile minimal
 
       - name: cargo +1.89 check（含 mock feature）
         run: cargo +1.89 check --all-targets --features mock
 
-  # ── 第四关：依赖审计 ──────────────────────────────────────────────────────
+  # ── Job 4: dependency audit ─────────────────────────────────────────────────
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
@@ -107,7 +118,8 @@ jobs:
       - uses: actions/checkout@v4
 
 
-      # 本 crate 直接持有平台密钥库句柄，多出来的依赖都是攻击面。
+      # This crate holds platform keystore handles directly, so every extra
+      # dependency is attack surface.
       - name: 安装 cargo-deny
         uses: taiki-e/install-action@v2
         with:

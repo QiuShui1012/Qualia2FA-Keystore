@@ -1,36 +1,42 @@
-# cargo-deny 配置。
+# cargo-deny configuration.
 #
-# 本 crate 直接持有平台密钥库的句柄、并编译进 `unsafe` 的 FFI 调用，多出来的每一个
-# 依赖都是额外的攻击面。因此依赖审计在这里同样是安全控制，不是杂事。
+# This crate holds platform keystore handles directly and compiles in `unsafe`
+# FFI calls, so every extra dependency is extra attack surface. Dependency
+# auditing is therefore a security control here, not a chore.
 #
-# 参考：https://embarkstudios.github.io/cargo-deny/
+# Reference: https://embarkstudios.github.io/cargo-deny/
 
 [graph]
-# 按目标平台分别评估依赖。平台后端的依赖（`windows-sys`）只在一个目标上生效，
-# 混在一起评估会把 Windows 专有依赖算到别的平台上。
+# Evaluates dependencies per target platform. A backend dependency
+# (`windows-sys`) takes effect on one target only, and evaluating everything
+# together would attribute Windows-only dependencies to other platforms.
 targets = [
     { triple = "x86_64-pc-windows-msvc" },
     { triple = "aarch64-linux-android" },
     { triple = "aarch64-apple-ios" },
 ]
-# 开发依赖与可选 feature（`mock` 会拉进 `p256`）也要审：它们不进产物，但可能带着
-# 漏洞进 CI 环境。
+# Dev-dependencies and optional features (`mock` pulls in `p256`) are audited
+# too: they do not reach the artifact, but they can carry vulnerabilities into
+# the CI environment.
 all-features = true
 
 [advisories]
 version = 2
 ignore = [
-    # 如有必须暂时接受的公告，在此列出并**附上理由与到期时间**，例如：
-    # { id = "RUSTSEC-0000-0000", reason = "无可利用路径，等上游 0.3.x 修复（复审：2026-12-31）" },
+    # List advisories that have to be accepted temporarily here, with a **reason
+    # and an expiry date**, for example:
+    # { id = "RUSTSEC-0000-0000", reason = "no exploitable path, waiting for the upstream 0.3.x fix (review: 2026-12-31)" },
 ]
 
 [licenses]
 version = 2
-# 本 crate 以 LGPL-3.0-or-later 发布，是一个**独立可复用**的库：任何需要「平台硬件里
-# 一对 P-256 身份密钥」的项目都能用它。因此允许清单按自己的依赖树给，而不是照抄
-# 某个下游——照抄会让下游换一个依赖时这里莫名其妙地过不了。
+# This crate is released under LGPL-3.0-or-later and is an **independently
+# reusable** library: any project that needs a P-256 identity key pair inside
+# platform hardware can use it. The allow list therefore follows this crate's own
+# dependency tree, not a downstream crate's.
 #
-# 注意：**不包含** GPL-2.0-only / SSPL / BUSL 等与 LGPL-3.0 不兼容或非自由的许可证。
+# Note: GPL-2.0-only / SSPL / BUSL and other licenses that are incompatible with
+# LGPL-3.0 or non-free are **not** included.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -49,20 +55,24 @@ allow = [
 ]
 confidence-threshold = 0.9
 
-# 白名单是**预先**为后续要引入的平台后端放行的，因此当前必然有一批许可证尚未被
-# 任何依赖用到。故把「白名单条目未命中」降级为允许，避免每次加依赖前都被噪音淹没。
+# The allow list is opened **in advance** for platform backends to be added
+# later, so a number of licenses are currently used by no dependency. "allowed
+# license not encountered" is therefore downgraded to allowed, so that adding a
+# dependency does not drown in noise.
 unused-allowed-license = "allow"
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
 
-# 明确禁止的 crate 及其理由。
+# Explicitly banned crates and the reason for each.
 #
-# 这里的重点是**平台抽象层**而不是密码学实现：本 crate 需要的是
-# 「能进硬件、且私钥导不出来」，任何不符合这一点的方案都不该出现在依赖里。
+# The focus here is the **platform abstraction layer** rather than cryptographic
+# implementations: this crate needs a key that can live in hardware and whose
+# private half cannot be exported, so any scheme that does not meet that must not
+# appear in the dependency graph.
 deny = [
-    # 已归档，见 `p256` crate 自身的说明。
+    # Archived; see the `p256` crate's own note.
     { name = "pqcrypto" },
     { name = "pqcrypto-kyber" },
     { name = "pqcrypto-dilithium" },
@@ -70,18 +80,20 @@ deny = [
     { name = "cosmian_kyber" },
     { name = "libcrux-kem" },
     { name = "libcrux-aesgcm" },
-    # CPace：Rust 生态无可用实现。
+    # CPace: no usable implementation in the Rust ecosystem.
     { name = "cpace" },
     { name = "pake-cpace" },
-    # 已并入 `aes`。
+    # Merged into `aes`.
     { name = "aes-soft" },
     { name = "aesni" },
-    # `rand` 的默认线程 RNG（`ThreadRng`）不适合生成密钥材料——它不保证密码学
-    # 安全性，也不是跨平台一致的。本 crate 一律用 `getrandom` 直接向操作系统取
-    # 随机数，所以把 `rand` 挡在门外，免得有人图省事引入。
+    # `rand`'s default thread RNG (`ThreadRng`) is unsuitable for generating key
+    # material: it makes no cryptographic guarantees and is not consistent across
+    # platforms. This crate always takes randomness straight from the OS through
+    # `getrandom`, so `rand` is kept out.
     #
-    # 注意：`p256` 在本 crate 里只用于 `mock` 后端（纯软件签名），且刻意**不开**
-    # `arithmetic` / `rand_core` 相关 feature，因此它不会把 `rand` 拖进来。
+    # Note: `p256` is used in this crate only by the `mock` backend (pure software
+    # signing), and deliberately does **not** enable the `arithmetic` /
+    # `rand_core` features, so it does not pull `rand` in.
     { name = "rand" },
 ]
 
