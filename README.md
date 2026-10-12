@@ -8,6 +8,8 @@
 
 私钥**永不离开硬件**，也永不进入本进程的地址空间。
 
+English version: [README.en.md](README.en.md).
+
 ## 两半，一个概念
 
 | 模块 | 做什么 | 持私钥吗 |
