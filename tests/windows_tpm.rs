@@ -134,7 +134,9 @@ fn duplicate_create_is_rejected_and_preserves_identity() {
     let id_first = first.public_key().device_id();
     drop(first);
 
-    let error = store.create(label.as_str()).expect_err("duplicate creation must be rejected");
+    let error = store
+        .create(label.as_str())
+        .expect_err("duplicate creation must be rejected");
     assert!(
         matches!(error, qualia_dik::KeyStoreError::KeyAlreadyExists { .. }),
         "wrong error type: {error:?}"
@@ -161,11 +163,15 @@ fn open_or_create_works_in_both_cases() {
     let label = TestLabel::new("open-or-create");
     let _ = store.delete(label.as_str());
 
-    let created = store.open_or_create(label.as_str()).expect("the first call must create");
+    let created = store
+        .open_or_create(label.as_str())
+        .expect("the first call must create");
     let id = created.public_key().device_id();
     drop(created);
 
-    let opened = store.open_or_create(label.as_str()).expect("the second call must open");
+    let opened = store
+        .open_or_create(label.as_str())
+        .expect("the second call must open");
     assert_eq!(
         opened.public_key().device_id(),
         id,
@@ -186,13 +192,17 @@ fn missing_label_reports_not_found() {
     let label = TestLabel::new("definitely-missing");
     let _ = store.delete(label.as_str());
 
-    let error = store.open(label.as_str()).expect_err("must report not found");
+    let error = store
+        .open(label.as_str())
+        .expect_err("must report not found");
     assert!(
         matches!(error, qualia_dik::KeyStoreError::KeyNotFound { .. }),
         "wrong error type: {error:?}"
     );
 
-    let error = store.delete(label.as_str()).expect_err("must report not found");
+    let error = store
+        .delete(label.as_str())
+        .expect_err("must report not found");
     assert!(
         matches!(error, qualia_dik::KeyStoreError::KeyNotFound { .. }),
         "wrong error type: {error:?}"

@@ -220,8 +220,9 @@ fn unreachable_public_key() -> DevicePublicKey {
         0x7C, 0x0F, 0x9E, 0x16, 0x2B, 0xCE, 0x33, 0x57, 0x6B, 0x31, 0x5E, 0xCE, 0xCB, 0xB6, 0x40,
         0x68, 0x37, 0xBF, 0x51, 0xF5,
     ];
-    public_key_from_sec1(&GENERATOR)
-        .unwrap_or_else(|_| unreachable!("the P-256 generator does not parse; the p256 implementation is broken"))
+    public_key_from_sec1(&GENERATOR).unwrap_or_else(|_| {
+        unreachable!("the P-256 generator does not parse; the p256 implementation is broken")
+    })
 }
 
 impl DeviceSigner for MockSigner {
@@ -291,7 +292,10 @@ mod tests {
         let first = store.create("device").expect("first create");
         let id_first = first.public_key().device_id();
 
-        assert!(store.create("device").is_err(), "duplicate creation must be rejected");
+        assert!(
+            store.create("device").is_err(),
+            "duplicate creation must be rejected"
+        );
 
         let again = store.open("device").expect("open");
         assert_eq!(

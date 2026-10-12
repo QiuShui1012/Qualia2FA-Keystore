@@ -178,7 +178,10 @@ mod tests {
     fn display_explains_the_situation() {
         let store = StubKeyStore::open_best_available();
         let text = store.to_string();
-        assert!(text.contains("has no device identity key store backend yet"), "the text does not say the backend is missing: {text}");
+        assert!(
+            text.contains("has no device identity key store backend yet"),
+            "the text does not say the backend is missing: {text}"
+        );
         assert!(!text.is_empty());
     }
 }

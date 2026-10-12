@@ -186,7 +186,9 @@ pub enum Error {
     /// The signature length returned by **hardware** is wrong.
     ///
     /// As above, this is an internal inconsistency rather than a user error.
-    #[error("hardware returned an invalid signature length: expected {expected} bytes, got {actual} bytes")]
+    #[error(
+        "hardware returned an invalid signature length: expected {expected} bytes, got {actual} bytes"
+    )]
     InvalidSignatureLength {
         /// Expected length.
         expected: usize,
@@ -247,7 +249,10 @@ mod tests {
             },
         ];
         for error in &missing {
-            assert!(error.is_missing_hardware(), "{error:?} must be classified as missing hardware");
+            assert!(
+                error.is_missing_hardware(),
+                "{error:?} must be classified as missing hardware"
+            );
         }
 
         let present = [
@@ -319,10 +324,7 @@ mod tests {
             "a platform call failure is an environmental problem"
         );
         assert!(
-            !Error::DeviceSignatureInvalid {
-                reason: "mismatch"
-            }
-            .is_environmental(),
+            !Error::DeviceSignatureInvalid { reason: "mismatch" }.is_environmental(),
             "a verification failure is **not** an environmental problem; it is a security event"
         );
         assert!(
@@ -383,7 +385,10 @@ mod tests {
         ];
         for (error, needle) in cases {
             let text = error.to_string();
-            assert!(text.contains(needle), "error text {text:?} does not contain {needle:?}");
+            assert!(
+                text.contains(needle),
+                "error text {text:?} does not contain {needle:?}"
+            );
         }
     }
 }

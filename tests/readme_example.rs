@@ -55,7 +55,10 @@ fn readme_usage_example_compiles_and_runs() {
     let signer = store.open_or_create(&label).expect("open or create");
 
     let device_id = signer.public_key().device_id().to_string();
-    assert!(!device_id.is_empty(), "the string form of the device id must not be empty");
+    assert!(
+        !device_id.is_empty(),
+        "the string form of the device id must not be empty"
+    );
 
     let message = b"\x07README example message";
     let signature = signer.sign(message).expect("sign");

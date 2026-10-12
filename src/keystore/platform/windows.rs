@@ -160,7 +160,7 @@ const MAX_LABEL_LEN: usize = 128;
 fn key_name(label: &str) -> Result<Vec<u16>> {
     if label.is_empty() {
         return Err(Error::InvalidKeyLabel {
-            reason: "the label is empty"
+            reason: "the label is empty",
         });
     }
     if label.len() > MAX_LABEL_LEN {
