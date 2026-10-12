@@ -78,7 +78,7 @@ use windows_sys::Win32::Security::Cryptography::{
 /// can pin the source values of the whole group in one place. `#[allow]` rather than
 /// `#[expect]`: the constant *is* used in test builds, where `expect(dead_code)` would
 /// itself be an unfulfilled expectation.
-#[allow(dead_code, reason = "供测试对照 winerror.h 钉住常量值")]
+#[allow(dead_code, reason = "pinned for tests to check against winerror.h")]
 const NTE_BAD_FLAGS: i32 = 0x8009_0009_u32 as i32;
 
 /// `NTE_NO_KEY`: no key is available. Some KSPs report this instead of [`NTE_BAD_KEYSET`].
@@ -160,12 +160,12 @@ const MAX_LABEL_LEN: usize = 128;
 fn key_name(label: &str) -> Result<Vec<u16>> {
     if label.is_empty() {
         return Err(Error::InvalidKeyLabel {
-            reason: "标签为空"
+            reason: "the label is empty"
         });
     }
     if label.len() > MAX_LABEL_LEN {
         return Err(Error::InvalidKeyLabel {
-            reason: "标签过长（上限 128 字节）",
+            reason: "the label is too long (limit is 128 bytes)",
         });
     }
     if !label
@@ -173,7 +173,7 @@ fn key_name(label: &str) -> Result<Vec<u16>> {
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
         return Err(Error::InvalidKeyLabel {
-            reason: "标签含非法字符（只允许 ASCII 字母、数字、- _ .）",
+            reason: "the label contains characters outside the allowed set (ASCII letters, digits, - _ .)",
         });
     }
     let name = format!("{KEY_NAME_PREFIX}{label}");
@@ -359,13 +359,13 @@ fn export_public_key(key: &CngHandle) -> Result<DevicePublicKey> {
     };
     if status < 0 {
         return Err(Error::Hardware {
-            operation: "NCryptExportKey(查询长度)",
+            operation: "NCryptExportKey(query length)",
             code: status,
         });
     }
     if needed > 1024 {
         return Err(Error::InvalidPublicKey {
-            reason: "平台报告的公钥长度异常（超过 1024 字节）",
+            reason: "the platform reported an implausible public key length (over 1024 bytes)",
         });
     }
 
@@ -393,19 +393,19 @@ fn export_public_key(key: &CngHandle) -> Result<DevicePublicKey> {
 
     if blob.len() < 8 {
         return Err(Error::InvalidPublicKey {
-            reason: "平台返回的公钥块短于 8 字节的头",
+            reason: "the public key blob returned by the platform is shorter than its 8-byte header",
         });
     }
     let cb_key = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize;
     let payload = &blob[8..];
     if payload.len() != cb_key * 2 {
         return Err(Error::InvalidPublicKey {
-            reason: "平台返回的公钥载荷长度与 cbKey 不符",
+            reason: "the public key payload length returned by the platform does not match cbKey",
         });
     }
     if cb_key != 32 {
         return Err(Error::InvalidPublicKey {
-            reason: "平台返回的公钥不是 32 字节坐标（不是 P-256）",
+            reason: "the public key returned by the platform is not a 32-byte coordinate (not P-256)",
         });
     }
 
@@ -450,7 +450,7 @@ fn sign_digest_raw(key: &CngHandle, digest: &[u8]) -> Result<DeviceSignature> {
     };
     if status < 0 {
         return Err(Error::Hardware {
-            operation: "NCryptSignHash(查询长度)",
+            operation: "NCryptSignHash(query length)",
             code: status,
         });
     }
@@ -515,8 +515,8 @@ impl WindowsProvider {
     /// Human-readable backend name, used in error messages.
     const fn describe(self) -> &'static str {
         match self {
-            Self::Tpm => "平台加密提供程序（TPM）",
-            Self::Software => "软件密钥存储提供程序",
+            Self::Tpm => "platform crypto provider (TPM)",
+            Self::Software => "software key storage provider",
         }
     }
 }
@@ -550,7 +550,7 @@ impl WindowsKeyStore {
     pub fn open(preferred: WindowsProvider) -> Result<Self> {
         let provider = open_provider(preferred.provider_name()).map_err(|error| {
             Error::HardwareUnavailable {
-                reason: format!("无法打开{}（{error}）", preferred.describe()),
+                reason: format!("cannot open {} ({error})", preferred.describe()),
             }
         })?;
         Ok(Self {
@@ -575,7 +575,7 @@ impl WindowsKeyStore {
             Err(tpm_error) => Self::open(WindowsProvider::Software).map_err(|software_error| {
                 Error::HardwareUnavailable {
                     reason: format!(
-                        "TPM 与软件密钥库都不可用（TPM: {tpm_error}；软件: {software_error}）"
+                        "neither the TPM nor the software key store is available (TPM: {tpm_error}; software: {software_error})"
                     ),
                 }
             }),
@@ -769,7 +769,7 @@ mod tests {
         ] {
             assert!(
                 !means_no_such_key(status),
-                "0x{:08X} 被误判为「密钥不存在」",
+                "0x{:08X} was mistaken for a missing key",
                 status as u32
             );
         }
@@ -779,9 +779,9 @@ mod tests {
     /// string.
     #[test]
     fn key_name_has_prefix_and_nul_terminator() {
-        let wide = key_name("device").expect("合法标签");
-        assert_eq!(wide.last(), Some(&0), "必须以 NUL 结尾");
-        let text = String::from_utf16(&wide[..wide.len() - 1]).expect("合法 UTF-16");
+        let wide = key_name("device").expect("valid label");
+        assert_eq!(wide.last(), Some(&0), "must end with NUL");
+        let text = String::from_utf16(&wide[..wide.len() - 1]).expect("valid UTF-16");
         assert_eq!(text, "Qualia2FA-Device-device");
     }
 
@@ -800,7 +800,7 @@ mod tests {
         for bad in [
             "a/b", "a\\b", "a b", "a:b", "a*b", "a?b", "a\"b", "a<b", "a|b", "设备", "a\nb", "a\tb",
         ] {
-            assert!(key_name(bad).is_err(), "{bad:?} 不应被接受");
+            assert!(key_name(bad).is_err(), "{bad:?} must not be accepted");
         }
     }
 
@@ -808,7 +808,7 @@ mod tests {
     #[test]
     fn label_with_allowed_characters_is_accepted() {
         for good in ["device", "Device-1", "a_b.c", "ABC123", "x"] {
-            assert!(key_name(good).is_ok(), "{good:?} 应被接受");
+            assert!(key_name(good).is_ok(), "{good:?} must be accepted");
         }
     }
 

@@ -129,7 +129,7 @@ pub mod platform_identity {
         } else if cfg!(target_os = "ios") {
             "iOS"
         } else {
-            "本平台"
+            "this platform"
         }
     }
 
@@ -149,7 +149,7 @@ pub mod platform_identity {
         } else if cfg!(target_os = "android") {
             "Keystore / StrongBox"
         } else {
-            "未定"
+            "undecided"
         }
     }
 }

@@ -56,7 +56,7 @@ pub enum Error {
     ///
     /// Public keys arrive as **external input** (QR codes, the network), so this is a normal
     /// rejection path rather than an internal inconsistency.
-    #[error("设备公钥非法：{reason}")]
+    #[error("invalid device public key: {reason}")]
     DevicePublicKeyInvalid {
         /// Opaque description for logs.
         reason: &'static str,
@@ -69,7 +69,7 @@ pub enum Error {
     /// The caller's response is identical (reject this authentication), and distinguishing
     /// them would give an attacker a small oracle: the difference between "malformed" and
     /// "did not verify" could be probed.
-    #[error("设备签名非法或验证不通过：{reason}")]
+    #[error("invalid device signature or verification failed: {reason}")]
     DeviceSignatureInvalid {
         /// Opaque description for logs. Must **not** contain the signature value itself.
         reason: &'static str,
@@ -82,7 +82,7 @@ pub enum Error {
     /// automatically. Whether software keys are acceptable is a security policy decision that
     /// requires explicit user consent; a silent fallback would leave the user believing the
     /// key is hardware-protected.
-    #[error("平台 {platform} 尚未实现硬件密钥库后端")]
+    #[error("platform {platform} has no hardware key store backend yet")]
     UnsupportedPlatform {
         /// Platform name (a compile-time constant, containing no user data).
         platform: &'static str,
@@ -97,14 +97,14 @@ pub enum Error {
     /// disabled by group policy, a key store held exclusively by another process); there a
     /// different platform is required. Merging them would make the UI give the same advice
     /// for "change machine" and "change device", which are two different user actions.
-    #[error("本机没有可用的硬件密钥库：{reason}")]
+    #[error("no usable hardware key store on this machine: {reason}")]
     HardwareUnavailable {
         /// A fixed reason description, or text supplied by the platform.
         reason: String,
     },
 
     /// A platform API returned a failure.
-    #[error("平台密钥库调用失败（{operation}，原生码 0x{code:08X}）")]
+    #[error("platform key store call failed ({operation}, native code 0x{code:08X})")]
     Hardware {
         /// Name of the failing operation, used for diagnostics.
         operation: &'static str,
@@ -118,7 +118,7 @@ pub enum Error {
     },
 
     /// The referenced key does not exist.
-    #[error("密钥 {label} 不存在")]
+    #[error("key {label} does not exist")]
     KeyNotFound {
         /// Logical name of the key (supplied by the caller, containing no secret).
         label: String,
@@ -136,7 +136,7 @@ pub enum Error {
     ///
     /// Relatedly, `create` **never overwrites** an existing key: overwriting would replace the
     /// device identity that other devices use to recognise this one.
-    #[error("密钥 {label} 已存在")]
+    #[error("key {label} already exists")]
     KeyAlreadyExists {
         /// Logical name of the key.
         label: String,
@@ -148,7 +148,7 @@ pub enum Error {
     /// handled inside the implementation. Accepting a digest of the wrong length would only
     /// let the signing and verification sides disagree about how far to truncate, and such a
     /// disagreement shows up as "signatures randomly fail to verify".
-    #[error("摘要长度非法：期望 {expected} 字节，实际 {actual} 字节")]
+    #[error("invalid digest length: expected {expected} bytes, got {actual} bytes")]
     InvalidDigestLength {
         /// Expected length.
         expected: usize,
@@ -162,7 +162,7 @@ pub enum Error {
     /// validated against a whitelist. The most direct hazard is NUL truncation: if `\0` were
     /// allowed, `"a\0b"` and `"a"` would be the same name to a C string, and two different
     /// labels would map to one device identity.
-    #[error("密钥标签不合法：{reason}")]
+    #[error("invalid key label: {reason}")]
     InvalidKeyLabel {
         /// Fixed reason description. Contains **no** raw label — it may come from user input.
         reason: &'static str,
@@ -177,7 +177,7 @@ pub enum Error {
     ///
     /// The two are handled quite differently: the first only requires rejecting this
     /// connection, the second has to surface an error a developer can see.
-    #[error("硬件返回的公钥非法：{reason}")]
+    #[error("hardware returned an invalid public key: {reason}")]
     InvalidPublicKey {
         /// Fixed reason description.
         reason: &'static str,
@@ -186,7 +186,7 @@ pub enum Error {
     /// The signature length returned by **hardware** is wrong.
     ///
     /// As above, this is an internal inconsistency rather than a user error.
-    #[error("硬件返回的签名长度非法：期望 {expected} 字节，实际 {actual} 字节")]
+    #[error("hardware returned an invalid signature length: expected {expected} bytes, got {actual} bytes")]
     InvalidSignatureLength {
         /// Expected length.
         expected: usize,
@@ -198,7 +198,7 @@ pub enum Error {
     ///
     /// Can only occur with the `mock` backend; real backends leave randomness to the hardware,
     /// which generates keys inside the TPM / Secure Enclave.
-    #[error("OS 随机源不可用")]
+    #[error("the OS random source is unavailable")]
     RandomnessUnavailable,
 }
 
@@ -247,7 +247,7 @@ mod tests {
             },
         ];
         for error in &missing {
-            assert!(error.is_missing_hardware(), "{error:?} 应被判定为缺少硬件");
+            assert!(error.is_missing_hardware(), "{error:?} must be classified as missing hardware");
         }
 
         let present = [
@@ -266,7 +266,7 @@ mod tests {
         for error in &present {
             assert!(
                 !error.is_missing_hardware(),
-                "{error:?} 不应被判定为缺少硬件"
+                "{error:?} must not be classified as missing hardware"
             );
         }
     }
@@ -280,8 +280,8 @@ mod tests {
             code: 0x8009_000F_u32 as i32,
         }
         .to_string();
-        assert!(text.contains("8009000F"), "实际: {text}");
-        assert!(text.contains("NCryptOpenStorageProvider"), "实际: {text}");
+        assert!(text.contains("8009000F"), "actual: {text}");
+        assert!(text.contains("NCryptOpenStorageProvider"), "actual: {text}");
     }
 
     /// **Negative** native codes must also print as a lookup-able hexadecimal value.
@@ -296,7 +296,7 @@ mod tests {
             code: -1,
         }
         .to_string();
-        assert!(text.contains("FFFFFFFF"), "实际: {text}");
+        assert!(text.contains("FFFFFFFF"), "actual: {text}");
     }
 
     /// Environment problems and signature problems are kept apart.
@@ -308,7 +308,7 @@ mod tests {
     fn environmental_failures_are_recognised() {
         assert!(
             Error::UnsupportedPlatform { platform: "ios" }.is_environmental(),
-            "平台未实现属于环境问题"
+            "an unsupported platform is an environmental problem"
         );
         assert!(
             Error::Hardware {
@@ -316,21 +316,21 @@ mod tests {
                 code: 0,
             }
             .is_environmental(),
-            "平台调用失败属于环境问题"
+            "a platform call failure is an environmental problem"
         );
         assert!(
             !Error::DeviceSignatureInvalid {
-                reason: "不匹配"
+                reason: "mismatch"
             }
             .is_environmental(),
-            "验签失败**不是**环境问题——它是安全事件"
+            "a verification failure is **not** an environmental problem; it is a security event"
         );
         assert!(
             !Error::DevicePublicKeyInvalid {
-                reason: "非曲线点"
+                reason: "off-curve point"
             }
             .is_environmental(),
-            "公钥非法不是环境问题"
+            "an invalid public key is not an environmental problem"
         );
     }
 
@@ -339,18 +339,18 @@ mod tests {
     #[test]
     fn the_two_invalid_public_key_cases_are_distinct() {
         let from_peer = Error::DevicePublicKeyInvalid {
-            reason: "该点不在 P-256 曲线上",
+            reason: "the point is not on the P-256 curve",
         };
         let from_hardware = Error::InvalidPublicKey {
-            reason: "长度不是 65 字节",
+            reason: "the length is not 65 bytes",
         };
         assert!(
             !from_peer.is_environmental(),
-            "对方给的公钥非法是正常的拒绝路径，不是环境问题"
+            "an invalid public key from a peer is a normal rejection path, not an environmental problem"
         );
         assert!(
             !from_hardware.is_environmental(),
-            "硬件返回非法公钥是内部矛盾，不是环境问题"
+            "an invalid public key from hardware is an internal inconsistency, not an environmental problem"
         );
         assert_ne!(from_peer.to_string(), from_hardware.to_string());
     }
@@ -383,7 +383,7 @@ mod tests {
         ];
         for (error, needle) in cases {
             let text = error.to_string();
-            assert!(text.contains(needle), "错误文本 {text:?} 未包含 {needle:?}");
+            assert!(text.contains(needle), "error text {text:?} does not contain {needle:?}");
         }
     }
 }

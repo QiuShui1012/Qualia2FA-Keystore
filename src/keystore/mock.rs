@@ -90,7 +90,7 @@ impl DeviceKeyStore for MockKeyStore {
     /// store's lock.
     fn open(&self, label: &str) -> Result<Box<dyn DeviceSigner>> {
         let keys = self.keys.lock().map_err(|_| Error::Hardware {
-            operation: "MockKeyStore 内部锁中毒",
+            operation: "MockKeyStore mutex poisoned",
             code: 0,
         })?;
         let signing = keys.get(label).ok_or_else(|| Error::KeyNotFound {
@@ -99,7 +99,7 @@ impl DeviceKeyStore for MockKeyStore {
 
         let bytes = signing.to_bytes();
         let owned = SigningKey::from_slice(&bytes).map_err(|_| Error::Hardware {
-            operation: "MockKeyStore 私钥复制失败",
+            operation: "MockKeyStore failed to copy the private key",
             code: 0,
         })?;
         drop(keys);
@@ -114,17 +114,17 @@ impl DeviceKeyStore for MockKeyStore {
     /// class of bug to diagnose.
     fn create(&self, label: &str) -> Result<Box<dyn DeviceSigner>> {
         let mut keys = self.keys.lock().map_err(|_| Error::Hardware {
-            operation: "MockKeyStore 内部锁中毒",
+            operation: "MockKeyStore mutex poisoned",
             code: 0,
         })?;
         if keys.contains_key(label) {
             return Err(Error::Hardware {
-                operation: "MockKeyStore::create（同名密钥已存在，拒绝覆盖）",
+                operation: "MockKeyStore::create (a key with this label already exists; overwriting is refused)",
                 code: 0,
             });
         }
         let signing = SigningKey::from_slice(&random_scalar()?).map_err(|_| Error::Hardware {
-            operation: "MockKeyStore 生成标量失败",
+            operation: "MockKeyStore failed to generate a scalar",
             code: 0,
         })?;
         let public = public_key_from_signing(&signing)?;
@@ -137,7 +137,7 @@ impl DeviceKeyStore for MockKeyStore {
 
     fn delete(&self, label: &str) -> Result<()> {
         let mut keys = self.keys.lock().map_err(|_| Error::Hardware {
-            operation: "MockKeyStore 内部锁中毒",
+            operation: "MockKeyStore mutex poisoned",
             code: 0,
         })?;
         if keys.remove(label).is_none() {
@@ -157,7 +157,7 @@ impl DeviceKeyStore for MockKeyStore {
 fn random_scalar() -> Result<[u8; 32]> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| Error::Hardware {
-        operation: "MockKeyStore 无法从 OS 取得随机数",
+        operation: "MockKeyStore could not obtain randomness from the OS",
         code: 0,
     })?;
     Ok(bytes)
@@ -221,7 +221,7 @@ fn unreachable_public_key() -> DevicePublicKey {
         0x68, 0x37, 0xBF, 0x51, 0xF5,
     ];
     public_key_from_sec1(&GENERATOR)
-        .unwrap_or_else(|_| unreachable!("P-256 生成元无法解析，p256 实现已损坏"))
+        .unwrap_or_else(|_| unreachable!("the P-256 generator does not parse; the p256 implementation is broken"))
 }
 
 impl DeviceSigner for MockSigner {
@@ -246,7 +246,7 @@ impl DeviceSigner for MockSigner {
             self.signing
                 .sign_prehash(digest)
                 .map_err(|_| Error::Hardware {
-                    operation: "MockKeyStore 签名失败",
+                    operation: "MockKeyStore signing failed",
                     code: 0,
                 })?;
         crate::keystore::traits::signature_from_raw(&signature.to_bytes())
@@ -262,10 +262,10 @@ mod tests {
     #[test]
     fn create_then_open_yields_same_identity() {
         let store = MockKeyStore::new();
-        let created = store.create("device").expect("创建");
+        let created = store.create("device").expect("create");
         let id_created = created.public_key().device_id();
 
-        let opened = store.open("device").expect("打开");
+        let opened = store.open("device").expect("open");
         assert_eq!(opened.public_key().device_id(), id_created);
     }
 
@@ -276,11 +276,11 @@ mod tests {
     #[test]
     fn open_missing_key_does_not_create() {
         let store = MockKeyStore::new();
-        let error = store.open("nope").expect_err("应失败");
+        let error = store.open("nope").expect_err("must fail");
         assert!(matches!(error, Error::KeyNotFound { .. }));
         assert!(
             store.open("nope").is_err(),
-            "第一次 open 竟然创建了密钥——open 必须只读"
+            "the first open created a key: open must be read-only"
         );
     }
 
@@ -288,16 +288,16 @@ mod tests {
     #[test]
     fn create_existing_key_is_rejected_and_does_not_replace() {
         let store = MockKeyStore::new();
-        let first = store.create("device").expect("首次创建");
+        let first = store.create("device").expect("first create");
         let id_first = first.public_key().device_id();
 
-        assert!(store.create("device").is_err(), "重复创建应被拒绝");
+        assert!(store.create("device").is_err(), "duplicate creation must be rejected");
 
-        let again = store.open("device").expect("打开");
+        let again = store.open("device").expect("open");
         assert_eq!(
             again.public_key().device_id(),
             id_first,
-            "拒绝重复创建的同时必须保留原身份"
+            "rejecting a duplicate create must keep the original identity"
         );
     }
 
@@ -305,8 +305,8 @@ mod tests {
     #[test]
     fn open_or_create_works_both_ways() {
         let store = MockKeyStore::new();
-        let a = store.open_or_create("device").expect("首次");
-        let b = store.open_or_create("device").expect("再次");
+        let a = store.open_or_create("device").expect("first call");
+        let b = store.open_or_create("device").expect("second call");
         assert_eq!(a.public_key().device_id(), b.public_key().device_id());
     }
 
@@ -316,12 +316,12 @@ mod tests {
         let store = MockKeyStore::new();
         let id = store
             .create("device")
-            .expect("创建")
+            .expect("create")
             .public_key()
             .device_id();
         let other = store.clone();
         assert_eq!(
-            other.open("device").expect("打开").public_key().device_id(),
+            other.open("device").expect("open").public_key().device_id(),
             id
         );
     }
@@ -331,12 +331,12 @@ mod tests {
     #[test]
     fn software_signature_verifies_with_core() {
         let store = MockKeyStore::new();
-        let signer = store.create("device").expect("创建");
+        let signer = store.create("device").expect("create");
         let message = b"\x07pairing message";
-        let signature = signer.sign(message).expect("签名");
+        let signature = signer.sign(message).expect("sign");
         assert!(
             device::verify(signer.public_key(), message, &signature).is_ok(),
-            "Core 必须接受软件后端的签名"
+            "Core must accept a signature from the software backend"
         );
     }
 
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn wrong_digest_length_is_rejected() {
         let store = MockKeyStore::new();
-        let signer = store.create("device").expect("创建");
+        let signer = store.create("device").expect("create");
         assert!(matches!(
             signer.sign_digest(&[0_u8; 20]),
             Err(Error::InvalidDigestLength { .. })
@@ -356,11 +356,11 @@ mod tests {
     #[test]
     fn delete_removes_identity() {
         let store = MockKeyStore::new();
-        store.create("device").expect("创建");
+        store.create("device").expect("create");
         assert!(store.open("device").is_ok());
 
-        store.delete("device").expect("删除");
-        assert!(store.open("device").is_err(), "删除后不应还能打开");
+        store.delete("device").expect("delete");
+        assert!(store.open("device").is_err(), "a deleted key must not open");
         assert!(matches!(
             store.delete("device"),
             Err(Error::KeyNotFound { .. })
@@ -371,8 +371,8 @@ mod tests {
     #[test]
     fn distinct_labels_are_distinct_identities() {
         let store = MockKeyStore::new();
-        let a = store.create("account-a").expect("创建 a");
-        let b = store.create("account-b").expect("创建 b");
+        let a = store.create("account-a").expect("create a");
+        let b = store.create("account-b").expect("create b");
         assert_ne!(a.public_key().device_id(), b.public_key().device_id());
     }
 
@@ -382,7 +382,7 @@ mod tests {
         let store = MockKeyStore::new();
         assert_eq!(store.backend(), Backend::Software);
         assert!(!store.backend().is_hardware_backed());
-        let signer = store.create("device").expect("创建");
+        let signer = store.create("device").expect("create");
         assert_eq!(signer.backend(), Backend::Software);
     }
 }

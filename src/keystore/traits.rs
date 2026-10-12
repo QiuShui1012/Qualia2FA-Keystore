@@ -257,7 +257,7 @@ pub(crate) fn signature_from_raw(raw: &[u8]) -> Result<DeviceSignature> {
 pub(crate) fn public_key_from_sec1(bytes: &[u8]) -> Result<DevicePublicKey> {
     if bytes.len() != PUBLIC_KEY_LEN {
         return Err(Error::InvalidPublicKey {
-            reason: "长度不是 65 字节的 SEC1 未压缩点",
+            reason: "the length is not that of a 65-byte uncompressed SEC1 point",
         });
     }
     DevicePublicKey::from_sec1_bytes(bytes)
@@ -292,12 +292,12 @@ mod tests {
         names.sort_unstable();
         let before = names.len();
         names.dedup();
-        assert_eq!(names.len(), before, "后端名有重复");
+        assert_eq!(names.len(), before, "the backend names contain duplicates");
         for name in names {
             assert!(!name.is_empty());
             assert!(
                 name.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
-                "{name} 不是适合持久化的小写形式"
+                "{name} is not a lower-case form suitable for persistence"
             );
         }
     }

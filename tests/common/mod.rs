@@ -89,7 +89,7 @@ pub fn hardware_store() -> Option<WindowsKeyStore> {
     match WindowsKeyStore::open(WindowsProvider::Tpm) {
         Ok(store) => Some(store),
         Err(error) => {
-            println!("跳过：本机 TPM 不可用（{error}）");
+            println!("skipping: no usable TPM on this machine ({error})");
             None
         }
     }
@@ -105,7 +105,7 @@ pub fn software_store() -> Option<WindowsKeyStore> {
     match WindowsKeyStore::open(WindowsProvider::Software) {
         Ok(store) => Some(store),
         Err(error) => {
-            println!("跳过：本机软件密钥库不可用（{error}）");
+            println!("skipping: no usable software key store on this machine ({error})");
             None
         }
     }

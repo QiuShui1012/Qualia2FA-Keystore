@@ -40,45 +40,45 @@ fn readme_usage_example_compiles_and_runs() {
     use qualia_dik::keystore::platform::{WindowsKeyStore, WindowsProvider};
 
     let Ok(store) = WindowsKeyStore::open(WindowsProvider::Tpm) else {
-        println!("跳过：本机没有可用的 TPM");
+        println!("skipping: no usable TPM on this machine");
         return;
     };
 
     assert!(
         store.backend().is_hardware_backed(),
-        "用 TPM 提供程序打开的密钥库必须报告硬件保护"
+        "a key store opened with the TPM provider must report hardware protection"
     );
 
     let label = format!("ReadmeExample-{}", std::process::id());
     let _ = store.delete(&label);
 
-    let signer = store.open_or_create(&label).expect("打开或创建");
+    let signer = store.open_or_create(&label).expect("open or create");
 
     let device_id = signer.public_key().device_id().to_string();
-    assert!(!device_id.is_empty(), "设备 ID 的字符串形式不应为空");
+    assert!(!device_id.is_empty(), "the string form of the device id must not be empty");
 
     let message = b"\x07README example message";
-    let signature = signer.sign(message).expect("签名");
+    let signature = signer.sign(message).expect("sign");
 
     qualia_dik::device::verify(signer.public_key(), message, &signature)
-        .expect("README 示例里的验签必须通过");
+        .expect("the verification in the README example must pass");
 
     let digest = qualia_dik::keystore::sha256(message);
-    let signature2 = signer.sign_digest(&digest).expect("摘要签名");
+    let signature2 = signer.sign_digest(&digest).expect("sign digest");
     qualia_dik::device::verify(signer.public_key(), message, &signature2)
-        .expect("按摘要签名后，对消息的验签同样必须通过");
+        .expect("a signature made over a digest must also verify against the message");
 
     assert!(
         store.open_or_create("坏 标签").is_err(),
-        "README 说 label 只允许 ASCII 字母数字与 - _ .，含空格的必须被拒绝"
+        "the README says a label allows only ASCII letters, digits and - _ ., so one containing a space must be rejected"
     );
 
     assert!(
         store.create(&label).is_err(),
-        "README 说 create 不覆盖已有密钥"
+        "the README says create does not overwrite an existing key"
     );
 
-    store.delete(&label).expect("清理");
+    store.delete(&label).expect("clean up");
 }
 
 /// The `mock` example from the README.
@@ -93,9 +93,9 @@ fn readme_mock_example_compiles_and_runs() {
     use qualia_dik::{DeviceKeyStore, MockKeyStore};
 
     let store = MockKeyStore::new();
-    let signer = store.create("test-device").expect("创建");
+    let signer = store.create("test-device").expect("create");
 
     let message = b"mock example";
-    let signature = signer.sign(message).expect("签名");
-    qualia_dik::device::verify(signer.public_key(), message, &signature).expect("验签");
+    let signature = signer.sign(message).expect("sign");
+    qualia_dik::device::verify(signer.public_key(), message, &signature).expect("verify");
 }

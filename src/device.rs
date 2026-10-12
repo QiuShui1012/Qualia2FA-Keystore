@@ -172,17 +172,17 @@ impl DevicePublicKey {
     pub fn from_sec1_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() != PUBLIC_KEY_LEN {
             return Err(Error::DevicePublicKeyInvalid {
-                reason: "长度不是 65 字节的 SEC1 未压缩点",
+                reason: "length is not a 65-byte SEC1 uncompressed point",
             });
         }
         if bytes[0] != 0x04 {
             return Err(Error::DevicePublicKeyInvalid {
-                reason: "SEC1 前缀不是 0x04（未压缩形式）",
+                reason: "the SEC1 prefix is not 0x04 (uncompressed form)",
             });
         }
         if VerifyingKey::from_sec1_bytes(bytes).is_err() {
             return Err(Error::DevicePublicKeyInvalid {
-                reason: "该点不在 P-256 曲线上",
+                reason: "the point is not on the P-256 curve",
             });
         }
 
@@ -235,7 +235,7 @@ impl DeviceSignature {
             bytes
                 .try_into()
                 .map_err(|_| Error::DeviceSignatureInvalid {
-                    reason: "长度不是 64 字节的原始 r||s",
+                    reason: "length is not 64 raw r||s bytes",
                 })?;
         Ok(Self(raw))
     }
@@ -277,7 +277,7 @@ impl core::fmt::Debug for DeviceSignature {
 /// small oracle.
 ///
 /// No input panics; every failure is returned as an error.
-#[must_use = "验证结果必须被检查，丢弃它等于没有验证"]
+#[must_use = "the verification result must be checked; discarding it is the same as not verifying"]
 pub fn verify(
     public_key: &DevicePublicKey,
     message: &[u8],
@@ -286,19 +286,19 @@ pub fn verify(
     let verifying_key =
         VerifyingKey::from_sec1_bytes(public_key.as_sec1_bytes()).map_err(|_| {
             Error::DeviceSignatureInvalid {
-                reason: "公钥无法解析（不应发生：构造时已验证）",
+                reason: "the public key failed to parse (should not happen: it was validated at construction)",
             }
         })?;
 
     let signature =
         Signature::from_slice(signature.as_bytes()).map_err(|_| Error::DeviceSignatureInvalid {
-            reason: "签名不是合法的 P-256 r||s",
+            reason: "the signature is not a valid P-256 r||s",
         })?;
 
     verifying_key
         .verify(message, &signature)
         .map_err(|_| Error::DeviceSignatureInvalid {
-            reason: "签名与公钥或消息不匹配",
+            reason: "the signature does not match the public key or the message",
         })
 }
 
@@ -309,16 +309,16 @@ mod tests {
 
     /// Builds a key pair for tests (generated in software, for tests only).
     fn test_key() -> (SigningKey, DevicePublicKey) {
-        let signing = SigningKey::from_slice(&[7_u8; 32]).expect("合法标量");
+        let signing = SigningKey::from_slice(&[7_u8; 32]).expect("valid scalar");
         let sec1 = signing.verifying_key().to_sec1_point(false);
-        let public = DevicePublicKey::from_sec1_bytes(sec1.as_bytes()).expect("合法点");
+        let public = DevicePublicKey::from_sec1_bytes(sec1.as_bytes()).expect("valid point");
         (signing, public)
     }
 
     /// Signs a message with a software key and produces our wire format.
     fn sign(signing: &SigningKey, message: &[u8]) -> DeviceSignature {
         let sig: Signature = signing.sign(message);
-        DeviceSignature::from_bytes(&sig.to_bytes()).expect("64 字节")
+        DeviceSignature::from_bytes(&sig.to_bytes()).expect("64 bytes")
     }
 
     /// Round trip: a signature over a message verifies against that message.
@@ -349,10 +349,10 @@ mod tests {
         for index in [0_usize, 31, 32, 63] {
             let mut raw = *signature.as_bytes();
             raw[index] ^= 0x01;
-            let tampered = DeviceSignature::from_bytes(&raw).expect("仍是 64 字节");
+            let tampered = DeviceSignature::from_bytes(&raw).expect("still 64 bytes");
             assert!(
                 verify(&public, message, &tampered).is_err(),
-                "第 {index} 字节被改动却通过了验证"
+                "byte {index} was modified but still verified"
             );
         }
     }
@@ -361,9 +361,10 @@ mod tests {
     #[test]
     fn wrong_public_key_fails() {
         let (signing, _) = test_key();
-        let other = SigningKey::from_slice(&[9_u8; 32]).expect("合法标量");
+        let other = SigningKey::from_slice(&[9_u8; 32]).expect("valid scalar");
         let other_sec1 = other.verifying_key().to_sec1_point(false);
-        let other_public = DevicePublicKey::from_sec1_bytes(other_sec1.as_bytes()).expect("合法点");
+        let other_public =
+            DevicePublicKey::from_sec1_bytes(other_sec1.as_bytes()).expect("valid point");
 
         let message = b"hello qualia2fa!";
         let signature = sign(&signing, message);
@@ -380,7 +381,7 @@ mod tests {
         bytes[64] = 1;
         assert!(
             DevicePublicKey::from_sec1_bytes(&bytes).is_err(),
-            "不在曲线上的点被接受了——这会导致非法曲线攻击"
+            "an off-curve point was accepted, which enables invalid-curve attacks"
         );
     }
 
@@ -396,7 +397,7 @@ mod tests {
         compressed[0] = 0x02;
         assert!(
             DevicePublicKey::from_sec1_bytes(&compressed).is_err(),
-            "压缩形式不应被接受"
+            "the compressed form must not be accepted"
         );
     }
 
@@ -418,9 +419,9 @@ mod tests {
         assert_eq!(id.to_hex().len(), DEVICE_ID_LEN * 2);
 
         let (_, other) = {
-            let signing = SigningKey::from_slice(&[9_u8; 32]).expect("合法标量");
+            let signing = SigningKey::from_slice(&[9_u8; 32]).expect("valid scalar");
             let sec1 = signing.verifying_key().to_sec1_point(false);
-            let public = DevicePublicKey::from_sec1_bytes(sec1.as_bytes()).expect("合法点");
+            let public = DevicePublicKey::from_sec1_bytes(sec1.as_bytes()).expect("valid point");
             (signing, public)
         };
         assert_ne!(id, other.device_id());
@@ -432,7 +433,7 @@ mod tests {
     fn debug_shows_hex() {
         let (_, public) = test_key();
         let text = format!("{public:?}");
-        assert!(text.starts_with("DevicePublicKey(04"), "实际: {text}");
+        assert!(text.starts_with("DevicePublicKey(04"), "actual: {text}");
         assert_eq!(
             text.len(),
             "DevicePublicKey(".len() + PUBLIC_KEY_LEN * 2 + 1

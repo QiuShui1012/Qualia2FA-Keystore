@@ -60,27 +60,27 @@ fn tpm_signature_verifies_with_core() {
     let label = TestLabel::new("sign-verify");
     let _ = store.delete(label.as_str());
 
-    let signer = store.create(label.as_str()).expect("创建 TPM 密钥");
+    let signer = store.create(label.as_str()).expect("create TPM key");
     let message = b"\x01Qualia2FA pairing challenge";
-    let signature = signer.sign(message).expect("TPM 签名");
+    let signature = signer.sign(message).expect("TPM sign");
 
     assert_eq!(
         signature.as_bytes().len(),
         64,
-        "签名长度不是 64 字节，说明后端返回的不是原始 r||s"
+        "the signature is not 64 bytes long, so the backend does not return raw r||s"
     );
 
     qualia_dik::device::verify(signer.public_key(), message, &signature)
-        .expect("Core 必须接受 TPM 签出来的签名");
+        .expect("Core must accept a signature produced by the TPM");
 
     let mut tampered = *message;
     tampered[0] ^= 0x01;
     assert!(
         qualia_dik::device::verify(signer.public_key(), &tampered, &signature).is_err(),
-        "被篡改的消息通过了验证"
+        "a tampered message verified"
     );
 
-    store.delete(label.as_str()).expect("清理");
+    store.delete(label.as_str()).expect("clean up");
 }
 
 /// Reopening must yield the same identity.
@@ -97,23 +97,23 @@ fn identity_is_stable_across_reopen() {
     let label = TestLabel::new("reopen");
     let _ = store.delete(label.as_str());
 
-    let created = store.create(label.as_str()).expect("创建");
+    let created = store.create(label.as_str()).expect("create");
     let id_at_create = created.public_key().device_id();
     drop(created);
 
-    let reopened = store.open(label.as_str()).expect("重新打开");
+    let reopened = store.open(label.as_str()).expect("reopen");
     assert_eq!(
         reopened.public_key().device_id(),
         id_at_create,
-        "重新打开后设备身份变了——密钥没有持久化"
+        "the device identity changed after reopening: the key was not persisted"
     );
 
     let message = b"reopen test";
-    let signature = reopened.sign(message).expect("签名");
+    let signature = reopened.sign(message).expect("sign");
     qualia_dik::device::verify(reopened.public_key(), message, &signature)
-        .expect("重开后签名仍应验证通过");
+        .expect("a signature must still verify after reopening");
 
-    store.delete(label.as_str()).expect("清理");
+    store.delete(label.as_str()).expect("clean up");
 }
 
 /// Duplicate creation must be rejected and must **not** replace the existing
@@ -130,24 +130,24 @@ fn duplicate_create_is_rejected_and_preserves_identity() {
     let label = TestLabel::new("duplicate");
     let _ = store.delete(label.as_str());
 
-    let first = store.create(label.as_str()).expect("首次创建");
+    let first = store.create(label.as_str()).expect("first create");
     let id_first = first.public_key().device_id();
     drop(first);
 
-    let error = store.create(label.as_str()).expect_err("重复创建应被拒绝");
+    let error = store.create(label.as_str()).expect_err("duplicate creation must be rejected");
     assert!(
         matches!(error, qualia_dik::KeyStoreError::KeyAlreadyExists { .. }),
-        "错误类型不对: {error:?}"
+        "wrong error type: {error:?}"
     );
 
-    let again = store.open(label.as_str()).expect("打开");
+    let again = store.open(label.as_str()).expect("open");
     assert_eq!(
         again.public_key().device_id(),
         id_first,
-        "拒绝重复创建的同时身份被换掉了——这是最危险的一种失败"
+        "the identity was replaced while rejecting the duplicate create; this is the most dangerous kind of failure"
     );
 
-    store.delete(label.as_str()).expect("清理");
+    store.delete(label.as_str()).expect("clean up");
 }
 
 /// `open_or_create` works both when the label already exists and when it does
@@ -161,18 +161,18 @@ fn open_or_create_works_in_both_cases() {
     let label = TestLabel::new("open-or-create");
     let _ = store.delete(label.as_str());
 
-    let created = store.open_or_create(label.as_str()).expect("首次应创建");
+    let created = store.open_or_create(label.as_str()).expect("the first call must create");
     let id = created.public_key().device_id();
     drop(created);
 
-    let opened = store.open_or_create(label.as_str()).expect("再次应打开");
+    let opened = store.open_or_create(label.as_str()).expect("the second call must open");
     assert_eq!(
         opened.public_key().device_id(),
         id,
-        "第二次调用不应生成新身份"
+        "the second call must not generate a new identity"
     );
 
-    store.delete(label.as_str()).expect("清理");
+    store.delete(label.as_str()).expect("clean up");
 }
 
 /// Opening and deleting a missing label must report `KeyNotFound` explicitly.
@@ -186,16 +186,16 @@ fn missing_label_reports_not_found() {
     let label = TestLabel::new("definitely-missing");
     let _ = store.delete(label.as_str());
 
-    let error = store.open(label.as_str()).expect_err("应报不存在");
+    let error = store.open(label.as_str()).expect_err("must report not found");
     assert!(
         matches!(error, qualia_dik::KeyStoreError::KeyNotFound { .. }),
-        "错误类型不对: {error:?}"
+        "wrong error type: {error:?}"
     );
 
-    let error = store.delete(label.as_str()).expect_err("应报不存在");
+    let error = store.delete(label.as_str()).expect_err("must report not found");
     assert!(
         matches!(error, qualia_dik::KeyStoreError::KeyNotFound { .. }),
-        "错误类型不对: {error:?}"
+        "wrong error type: {error:?}"
     );
 }
 
@@ -212,16 +212,16 @@ fn distinct_labels_are_distinct_identities() {
     let _ = store.delete(a.as_str());
     let _ = store.delete(b.as_str());
 
-    let signer_a = store.create(a.as_str()).expect("创建 a");
-    let signer_b = store.create(b.as_str()).expect("创建 b");
+    let signer_a = store.create(a.as_str()).expect("create a");
+    let signer_b = store.create(b.as_str()).expect("create b");
     assert_ne!(
         signer_a.public_key().device_id(),
         signer_b.public_key().device_id(),
-        "两个标签给出了同一份身份"
+        "two labels produced the same identity"
     );
 
-    store.delete(a.as_str()).expect("清理 a");
-    store.delete(b.as_str()).expect("清理 b");
+    store.delete(a.as_str()).expect("clean up a");
+    store.delete(b.as_str()).expect("clean up b");
 }
 
 /// The TPM backend must report itself as TPM and as hardware-backed. Requires a
@@ -237,7 +237,7 @@ fn tpm_backend_reports_tpm() {
     );
     assert!(
         qualia_dik::DeviceKeyStore::backend(&store).is_hardware_backed(),
-        "TPM 后端必须被判定为硬件保护"
+        "the TPM backend must be classified as hardware protected"
     );
 }
 
@@ -256,22 +256,22 @@ fn software_provider_also_signs_and_verifies() {
     let label = TestLabel::new("software-provider");
     let _ = store.delete(label.as_str());
 
-    let signer = store.create(label.as_str()).expect("创建软件密钥");
+    let signer = store.create(label.as_str()).expect("create software key");
     assert_eq!(
         qualia_dik::DeviceKeyStore::backend(&store),
         qualia_dik::Backend::Software
     );
     assert!(
         !qualia_dik::DeviceKeyStore::backend(&store).is_hardware_backed(),
-        "软件后端不得被判定为硬件保护"
+        "the software backend must not be classified as hardware protected"
     );
 
     let message = b"software path";
-    let signature = signer.sign(message).expect("签名");
+    let signature = signer.sign(message).expect("sign");
     qualia_dik::device::verify(signer.public_key(), message, &signature)
-        .expect("软件后端的签名同样必须被 Core 接受");
+        .expect("Core must also accept a signature from the software backend");
 
-    store.delete(label.as_str()).expect("清理");
+    store.delete(label.as_str()).expect("clean up");
 }
 
 /// Invalid labels must be rejected **before** any hardware is touched. Requires
@@ -283,10 +283,10 @@ fn invalid_labels_are_rejected_before_touching_hardware() {
         return;
     };
     for bad in ["", "a/b", "a\0b", "has space", "设备", &"x".repeat(200)] {
-        let error = store.open(bad).expect_err("应拒绝");
+        let error = store.open(bad).expect_err("must be rejected");
         assert!(
             matches!(error, qualia_dik::KeyStoreError::InvalidKeyLabel { .. }),
-            "标签 {bad:?} 的错误类型不对: {error:?}"
+            "wrong error type for label {bad:?}: {error:?}"
         );
     }
 }

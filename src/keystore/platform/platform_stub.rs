@@ -123,7 +123,7 @@ impl fmt::Display for StubKeyStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} 尚未实现设备身份密钥库后端（计划使用 {}）",
+            "{} has no device identity key store backend yet (planned: {})",
             StubProvider::platform_name(),
             StubProvider::planned_backend()
         )
@@ -158,9 +158,9 @@ mod tests {
         ] {
             match result {
                 Err(Error::UnsupportedPlatform { platform }) => {
-                    assert!(!platform.is_empty(), "平台名不得为空");
+                    assert!(!platform.is_empty(), "the platform name must not be empty");
                 }
-                other => panic!("期望 UnsupportedPlatform，实际是 {other:?}"),
+                other => panic!("expected UnsupportedPlatform, got {other:?}"),
             }
         }
     }
@@ -178,7 +178,7 @@ mod tests {
     fn display_explains_the_situation() {
         let store = StubKeyStore::open_best_available();
         let text = store.to_string();
-        assert!(text.contains("尚未实现"), "文案未说明未实现：{text}");
+        assert!(text.contains("has no device identity key store backend yet"), "the text does not say the backend is missing: {text}");
         assert!(!text.is_empty());
     }
 }

@@ -98,7 +98,7 @@
 //! let store = MockKeyStore::new();
 //! let signer = store.create("my-device")?;
 //!
-//! println!("设备 ID：{}", signer.public_key().device_id());
+//! println!("device id: {}", signer.public_key().device_id());
 //!
 //! let message = b"a message to sign";
 //! let signature = signer.sign(message)?;
