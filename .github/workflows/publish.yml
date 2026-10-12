@@ -49,7 +49,7 @@ jobs:
             python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
           echo "tag=$tag manifest=$manifest"
           if [ "$tag" != "$manifest" ]; then
-            echo "::error::标签 $GITHUB_REF_NAME 与 Cargo.toml 里的版本 $manifest 不一致"
+            echo "::error::tag $GITHUB_REF_NAME does not match the version $manifest in Cargo.toml"
             exit 1
           fi
 
@@ -119,7 +119,7 @@ jobs:
                --title "$GITHUB_REF_NAME" \
                --notes "Published to crates.io as \`qualia-dik\`." \
                --verify-tag; then
-            echo "已创建 GitHub Release $GITHUB_REF_NAME"
+            echo "Created GitHub Release $GITHUB_REF_NAME"
           else
-            echo "::warning::crate 已成功发布到 crates.io，但 GitHub Release 创建失败（通常是因为 workflow 缺少 contents: write 权限）。这不影响发布结果。"
+            echo "::warning::the crate reached crates.io, but creating the GitHub Release failed (usually a missing contents: write permission). The publishing result is unaffected."
           fi

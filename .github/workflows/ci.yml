@@ -33,7 +33,7 @@ env:
 jobs:
   # ── Job 1: fmt, lint, tests (Windows, the only platform with a backend) ─────
   check-windows:
-    name: fmt + clippy + test（Windows）
+    name: fmt + clippy + test (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +46,7 @@ jobs:
       # This crate is the only place where unsafe is allowed, and CI's -D warnings
       # turns `undocumented_unsafe_blocks` and `unsafe_op_in_unsafe_fn` into
       # errors: every unsafe block must state why its invariants hold.
-      - name: cargo clippy（-D warnings）
+      - name: cargo clippy (-D warnings)
         run: cargo clippy --all-targets -- -D warnings
 
       # Integration tests that touch a real TPM. GitHub's Windows runners usually
@@ -56,7 +56,7 @@ jobs:
       - name: cargo test
         run: cargo test --all-targets
 
-      - name: cargo doc（不得有警告）
+      - name: cargo doc (no warnings)
         run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
@@ -74,7 +74,7 @@ jobs:
   # hardware-independent tests -- including the `mock` backend and the
   # abstraction layer itself.
   check-linux:
-    name: 非 Windows 平台构建 + mock 后端测试（Linux）
+    name: non-Windows build + mock backend tests (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,7 +83,7 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      - name: cargo clippy（-D warnings）
+      - name: cargo clippy (-D warnings)
         run: cargo clippy --all-targets -- -D warnings
 
       # On Linux, `mock` is the **only** available backend. Running it verifies
@@ -104,10 +104,10 @@ jobs:
       # `rust-version` field. It runs on Linux to save time: the MSRV concerns
       # language and dependency features, not the platform backend, whose
       # compilation the Windows job already covers.
-      - name: 安装 1.89 工具链
+      - name: Install the 1.89 toolchain
         run: rustup toolchain install 1.89 --profile minimal
 
-      - name: cargo +1.89 check（含 mock feature）
+      - name: cargo +1.89 check (with the mock feature)
         run: cargo +1.89 check --all-targets --features mock
 
   # ── Job 4: dependency audit ─────────────────────────────────────────────────
@@ -120,7 +120,7 @@ jobs:
 
       # This crate holds platform keystore handles directly, so every extra
       # dependency is attack surface.
-      - name: 安装 cargo-deny
+      - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
