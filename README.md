@@ -26,7 +26,7 @@ use qualia_dik::{DeviceKeyStore, device};
 let signer = store.open_or_create("account-1")?;
 
 // 公钥不是秘密，可以随意传播。
-println!("设备 ID: {}", signer.public_key().device_id());
+println!("device id: {}", signer.public_key().device_id());
 
 let message = b"a message to sign";
 let signature = signer.sign(message)?;
