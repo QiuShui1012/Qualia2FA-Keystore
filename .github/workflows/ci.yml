@@ -92,6 +92,17 @@ jobs:
       - name: cargo test --features mock
         run: cargo test --features mock --all-targets
 
+      # The Android backend is narrowed to that target, so nothing above compiles
+      # it: on Linux it is excluded exactly like any other platform this machine
+      # is not. Cross-checking is what compiles it, and `-D warnings` is what makes
+      # the check worth as much as the others -- `clippy` and `check` do not link,
+      # so no NDK is needed for either.
+      - name: Install the Android target
+        run: rustup target add aarch64-linux-android
+
+      - name: cargo clippy --target aarch64-linux-android (-D warnings)
+        run: cargo clippy --target aarch64-linux-android --lib -- -D warnings
+
   # ── Job 3: MSRV ─────────────────────────────────────────────────────────────
   msrv:
     name: MSRV 1.89
