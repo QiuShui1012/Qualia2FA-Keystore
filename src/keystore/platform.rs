@@ -24,9 +24,9 @@
 //! |---|---|---|
 //! | Windows | CNG `NCrypt*` + TPM 2.0 | **implemented and verified on real hardware** |
 //! | Windows (no TPM) | CNG software KSP | implemented (reports `Backend::Software`) |
+//! | Android | Keystore, StrongBox preferred | **implemented and verified on real hardware** |
 //! | macOS | Secure Enclave | **placeholder** |
 //! | Linux | TPM 2.0 | **placeholder** |
-//! | Android | Keystore / StrongBox | **placeholder** |
 //! | iOS | Secure Enclave | **placeholder** |
 //! | Other (BSD, …) | undecided | **placeholder** |
 //!
@@ -67,11 +67,19 @@
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+/// Android Keystore backend, reached over JNI.
+#[cfg(target_os = "android")]
+pub mod android;
+
 /// Placeholder implementation shared by all platforms without a backend.
 ///
-/// Compiled on every platform except Windows. "Not implemented yet" is the same
-/// situation on all of them, hence a single implementation; what each platform *plans*
-/// to use is recorded in [`platform_identity`].
+/// Compiled on every platform except Windows and Android. "Not implemented yet" is the same
+/// situation on all of them, hence a single implementation; what each platform *plans* to
+/// use is recorded in [`platform_identity`].
+///
+/// It also supplies `PlatformProvider` on Android, which has no provider to choose between:
+/// there the security level of a key is decided when the key is generated, not by opening a
+/// provider.
 #[cfg(not(target_os = "windows"))]
 pub mod platform_stub;
 
@@ -82,9 +90,13 @@ pub mod platform_stub;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsKeyStore as PlatformKeyStore;
 
+/// The key store implementation available on the current platform.
+#[cfg(target_os = "android")]
+pub use android::AndroidKeyStore as PlatformKeyStore;
+
 /// The key store implementation available on the current platform (this platform's
 /// backend is not implemented yet).
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "android")))]
 pub use platform_stub::StubKeyStore as PlatformKeyStore;
 
 /// The storage provider of the current platform.

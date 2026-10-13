@@ -39,6 +39,14 @@ use crate::{Error, Result};
 
 pub mod platform;
 
+/// Conversions a platform's answers go through.
+///
+/// Compiled where a backend needs it — Android — and under `test`, so that they are checked
+/// on the host as well. On a platform whose backend converts nothing, they would be dead
+/// code, which `-D warnings` treats as an error.
+#[cfg(any(test, target_os = "android"))]
+mod encoding;
+
 mod traits;
 
 #[cfg(any(test, feature = "mock"))]
@@ -55,17 +63,18 @@ pub use traits::{Backend, DIGEST_LEN, DeviceKeyStore, DeviceSigner, sha256};
 /// On platforms without a backend this is the stub: every operation returns
 /// [`Error::UnsupportedPlatform`], and it never falls back to a software key.
 ///
-/// # The two backends have different constructor signatures
+/// # The backends have different constructor signatures
 ///
 /// | backend | signature |
 /// |---|---|
-/// | Windows | `fn open_best_available() -> Result<Self>` |
+/// | Windows, Android | `fn open_best_available() -> Result<Self>` |
 /// | others | `const fn open_best_available() -> Self` |
 ///
-/// Opening the best available provider can fail on Windows (no TPM, disabled by
-/// group policy, key store in use) and the user has to be told. The stub backend
-/// cannot fail, so a `Result` around it would only add an error branch that is
-/// never taken. Callers therefore write the call once per platform with `#[cfg]`,
+/// Opening the best available provider can fail where there is one to open: Windows may
+/// have no TPM, or a key store held by another process, and Android may be reached without
+/// the Java VM this library needs. A caller has to be told, so the call returns a `Result`.
+/// The stub backend cannot fail, and a `Result` around it would only add an error branch
+/// that is never taken. Callers therefore write the call once per platform with `#[cfg]`,
 /// which keeps the difference between the two failure models visible in the code.
 pub use platform::PlatformKeyStore;
 

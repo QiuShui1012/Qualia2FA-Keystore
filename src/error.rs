@@ -124,6 +124,26 @@ pub enum Error {
         label: String,
     },
 
+    /// The platform reported a failure in its own words.
+    ///
+    /// # Why this is separate from [`Error::Hardware`]
+    ///
+    /// Android reports failures as Java exceptions rather than as numeric codes: the class
+    /// and the message are the whole diagnosis, and there is no code to format. Collapsing
+    /// the two would either invent a code that means nothing or throw the message away —
+    /// and the message is what tells a user apart "this device has no secure hardware" from
+    /// "this key was refused".
+    ///
+    /// The detail is the platform's own text, naming an operation and an exception. The
+    /// platform does not put key material in it.
+    #[error("platform key store call failed ({operation}): {detail}")]
+    Jni {
+        /// Name of the failing operation, used for diagnostics.
+        operation: &'static str,
+        /// What the platform reported. Contains no key material.
+        detail: String,
+    },
+
     /// A key already exists under this `label`.
     ///
     /// # Why this is a separate variant

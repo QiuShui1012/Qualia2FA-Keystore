@@ -75,6 +75,17 @@ getrandom = { version = "0.4.3", optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography"] }
 
+# Android Keystore. Android has no C API for it: a key is created and used through
+# `java.security` and `android.security.keystore`, so the calls are JNI calls into the
+# JVM's own boot-class-path classes. No Java helper class is involved, or shipped.
+#
+# `invocation` provides `JavaVM::attach_current_thread`, which every call needs: the key
+# store is reached from Rust threads the JVM has never seen.
+#
+# Only the Android target carries it; on any other target the module is not compiled.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false, features = ["invocation"] }
+
 [features]
 # Exposes the pure software in-memory keystore so upper layers can use it in
 # their own tests.

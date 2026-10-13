@@ -27,7 +27,7 @@ use crate::{Error, Result};
 /// `public_key_from_sec1`, which compile under the same `cfg` as this import.
 /// The two `cfg`s must stay identical: a library build for Linux or Android drops
 /// those functions, and an unused import fails the build under `-D warnings`.
-#[cfg(any(test, feature = "mock", target_os = "windows"))]
+#[cfg(any(test, feature = "mock", target_os = "windows", target_os = "android"))]
 use crate::device::{PUBLIC_KEY_LEN, SIGNATURE_LEN};
 
 /// Length of a P-256 digest (SHA-256), in bytes.
@@ -238,7 +238,7 @@ pub fn sha256(message: &[u8]) -> [u8; DIGEST_LEN] {
 ///
 /// Compiled only when a backend is, hence the same `cfg`; otherwise a library
 /// build reports an unused function.
-#[cfg(any(test, feature = "mock", target_os = "windows"))]
+#[cfg(any(test, feature = "mock", target_os = "windows", target_os = "android"))]
 pub(crate) fn signature_from_raw(raw: &[u8]) -> Result<DeviceSignature> {
     if raw.len() != SIGNATURE_LEN {
         return Err(Error::InvalidSignatureLength {
@@ -253,7 +253,7 @@ pub(crate) fn signature_from_raw(raw: &[u8]) -> Result<DeviceSignature> {
 /// [`DevicePublicKey`].
 ///
 /// Compiled under the same `cfg` as [`signature_from_raw`].
-#[cfg(any(test, feature = "mock", target_os = "windows"))]
+#[cfg(any(test, feature = "mock", target_os = "windows", target_os = "android"))]
 pub(crate) fn public_key_from_sec1(bytes: &[u8]) -> Result<DevicePublicKey> {
     if bytes.len() != PUBLIC_KEY_LEN {
         return Err(Error::InvalidPublicKey {
