@@ -263,16 +263,24 @@ fn describe(env: &mut JNIEnv<'_>, operation: &'static str, error: jni::errors::E
 /// The exception the platform has thrown, cleared on the way out, or `None` when there is
 /// none.
 ///
-/// Reading it *and clearing it* matters: a pending exception makes every later JNI call on
-/// this thread fail, so leaving one behind would turn one failure into a cascade.
+/// # The order of the two calls is not a style choice
+///
+/// Reading the throwable and clearing the exception have to happen **before** anything else
+/// is asked of the JVM. Almost every JNI function may not be called while an exception is
+/// pending, and a checked JVM does not merely refuse: it aborts the process. Describing the
+/// throwable — resolving its class, reading its message — is several such calls, so it runs
+/// only once the exception is cleared, on a reference that stays valid.
+///
+/// Getting this wrong also hides what it breaks: a failure that the caller was going to
+/// recover from, such as a StrongBox that the device does not have, becomes a terminated
+/// application instead of a second attempt.
 fn pending_exception(env: &mut JNIEnv<'_>) -> Option<String> {
     if !env.exception_check().ok()? {
         return None;
     }
     let throwable = env.exception_occurred().ok()?;
-    let described = describe_throwable(env, &throwable);
     let _ = env.exception_clear();
-    described
+    describe_throwable(env, &throwable)
 }
 
 /// `ClassName: message` of a throwable, or just the class name when it carries no message.
