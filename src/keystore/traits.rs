@@ -217,6 +217,280 @@ pub trait DeviceKeyStore: core::fmt::Debug {
     }
 }
 
+/// Length of the application's master key, in bytes.
+///
+/// The master key is **opaque material**: this crate never derives anything from it, never
+/// interprets it and never compares it for anything but equality. It is passed to a platform
+/// key store and taken back unchanged, so the only thing this crate has to know about it is
+/// its length — the length the application's vault layer uses.
+pub const MASTER_KEY_LEN: usize = 32;
+
+/// The application's master key: [`MASTER_KEY_LEN`] bytes of opaque material.
+///
+/// # `Debug` never shows the material
+///
+/// A master key opens every vault of an account, so it must not reach a log through a
+/// `#[derive(Debug)]` on some enclosing type. `Debug` is implemented by hand and prints the
+/// length only; the bytes are reachable only through [`MasterKey::as_bytes`], which a caller
+/// has to ask for explicitly.
+///
+/// # The material is wiped on drop
+///
+/// `Drop` overwrites the bytes with `zeroize`, the same crate the software signer of the
+/// `mock` backend uses for its private key. This does not make the type a secure container
+/// (copies made by the caller are the caller's business), it removes the one copy this crate
+/// owns.
+///
+/// # There is no `PartialEq`
+///
+/// Comparing secrets has to be constant time, and a derived `==` is not. A caller that has
+/// to compare takes [`MasterKey::as_bytes`] and does the comparison itself, with a
+/// constant-time routine of its own.
+#[derive(Clone)]
+pub struct MasterKey {
+    /// The material, overwritten in `Drop`.
+    bytes: [u8; MASTER_KEY_LEN],
+}
+
+impl MasterKey {
+    /// Wraps [`MASTER_KEY_LEN`] bytes as a master key.
+    ///
+    /// Infallible: any byte string of the right length is valid master key material, because
+    /// nothing in this crate interprets it.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; MASTER_KEY_LEN]) -> Self {
+        Self { bytes }
+    }
+
+    /// The material.
+    ///
+    /// The returned reference is not secret-aware: a caller that logs it, formats it or
+    /// compares it with `==` has taken over the responsibility for it.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; MASTER_KEY_LEN] {
+        &self.bytes
+    }
+}
+
+/// Prints the length only, never the material.
+impl core::fmt::Debug for MasterKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MasterKey")
+            .field("len", &MASTER_KEY_LEN)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Wipes the material when the value goes away.
+impl Drop for MasterKey {
+    fn drop(&mut self) {
+        use p256::elliptic_curve::zeroize::Zeroize;
+        self.bytes.zeroize();
+    }
+}
+
+/// The wrapped form of a master key: opaque bytes for the caller to persist.
+///
+/// This is what a [`WrappedMasterKeyStore`] hands back. The bytes are whatever that store's
+/// platform produces — a sealed blob — and they are meaningless to this crate: it never
+/// looks inside, and only the store that produced them (holding the key-encryption key in
+/// its platform hardware) can turn them back into the master key. The wrapped form is
+/// therefore **not secret** in the sense the master key is: an attacker who copies the bytes
+/// still needs the platform key that is not in them.
+///
+/// `Debug` prints the length only. The blob is not a secret, but a debug line is not a place
+/// to accumulate it either, and the length is enough to tell "no blob" from "a blob".
+#[derive(Clone)]
+pub struct WrappedMasterKey {
+    /// The bytes as the platform produced them.
+    bytes: Vec<u8>,
+}
+
+impl WrappedMasterKey {
+    /// Takes ownership of bytes a platform store produced.
+    #[must_use]
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+
+    /// The bytes to persist, verbatim.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Consumes the value and returns the bytes to persist.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+/// Prints the length only.
+impl core::fmt::Debug for WrappedMasterKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WrappedMasterKey")
+            .field("len", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The master key held **directly** by the platform key store.
+///
+/// # What "directly" means
+///
+/// The store is given the material and keeps it; the caller persists nothing of its own for
+/// this key. Reading it back returns the same bytes.
+///
+/// # This is one of two forms, and the caller picks by constructor
+///
+/// [`WrappedMasterKeyStore`] is the other one. There is no flag and no mode argument: a
+/// caller that wants the wrapped form reaches for a different type, and a backend that
+/// implements one form cannot silently answer for the other.
+///
+/// # Honest backends
+///
+/// [`DirectMasterKeyStore::backend`] reports the platform key store that actually answered,
+/// exactly as [`DeviceKeyStore::backend`] does. A platform that cannot hold the material
+/// reports [`Error::UnsupportedPlatform`] instead of substituting something weaker.
+///
+/// # `label`
+///
+/// A label names one master key among several (one per account, for example) and follows the
+/// same rules as the device identity label: ASCII letters, digits, `-`, `_` and `.`, at most
+/// 128 bytes. The exact rejection is backend specific; the error is
+/// [`Error::InvalidKeyLabel`].
+///
+/// # Storing replaces
+///
+/// Storing under a label that already holds material replaces it. The caller owns the vault
+/// files, and a recovery or re-pairing legitimately replaces the master key; refusing would
+/// leave the caller with no way to follow its own data.
+pub trait DirectMasterKeyStore: core::fmt::Debug {
+    /// The platform key store that holds the material, as probed at run time.
+    fn backend(&self) -> Backend;
+
+    /// Stores `key` under `label`, replacing what was there.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidKeyLabel`] for an unusable label, and a backend specific error when
+    /// the platform refuses to hold the material — including the case where it accepts it
+    /// but will not hand it back, which is not a usable store for this form
+    /// ([`Error::KeyNotExportable`]).
+    fn store(&self, label: &str, key: &MasterKey) -> Result<()>;
+
+    /// Reads the master key stored under `label`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyNotFound`] when the label holds nothing. The method never creates or
+    /// replaces anything.
+    fn load(&self, label: &str) -> Result<MasterKey>;
+
+    /// Deletes the master key stored under `label`.
+    ///
+    /// # Warning
+    ///
+    /// Every vault that was opened with this key becomes unreadable on this device unless
+    /// the key exists elsewhere (a recovery key, another device). The caller has to ask the
+    /// user first.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyNotFound`] when the label holds nothing.
+    fn delete(&self, label: &str) -> Result<()>;
+}
+
+/// The master key held **wrapped** by a non-exportable platform key.
+///
+/// # What "wrapped" means
+///
+/// The store generates a key-encryption key (KEK) inside the platform key store. The KEK is
+/// **not exportable**: it cannot be read out of the store, by this crate or by anyone else.
+/// The store uses it to wrap the master key, and what is left over is the wrapped form, which
+/// the caller persists.
+///
+/// Only the wrapped bytes are ever persisted; the master key itself is not, and the KEK
+/// never leaves the platform. Stealing the persisted bytes is therefore not the same as
+/// stealing the master key: the thief also needs the platform key store entry, which does not
+/// leave the device.
+///
+/// # The KEK and its operations are not in this interface
+///
+/// There is no method that encrypts, decrypts, wraps, unwraps or returns the KEK. Wrapping is
+/// the internal design of this form: the caller stores a master key and gets back the bytes
+/// to keep, and that is the whole interface. A caller that needs a raw wrapping primitive
+/// wants a different crate.
+///
+/// # The bytes belong to one key store entry
+///
+/// [`WrappedMasterKeyStore::load`] has to be given the bytes that the same store produced for
+/// the same label. Bytes from another label, from another device, or bytes that were damaged
+/// in storage fail with an error; they never yield a master key that merely differs.
+///
+/// # Honest backends
+///
+/// As in [`DirectMasterKeyStore`]: [`WrappedMasterKeyStore::backend`] reports what actually
+/// answered, and a platform without an implementation returns
+/// [`Error::UnsupportedPlatform`].
+///
+/// # Storing keeps the KEK
+///
+/// Storing under an existing label wraps with the KEK that is already there, so previously
+/// persisted bytes keep unwrapping. Deleting the label deletes the KEK, and every blob
+/// wrapped with it becomes unusable — which is the intent.
+pub trait WrappedMasterKeyStore: core::fmt::Debug {
+    /// The platform key store that holds the key-encryption key, as probed at run time.
+    fn backend(&self) -> Backend;
+
+    /// Wraps `key` under `label` and returns the bytes for the caller to persist.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidKeyLabel`] for an unusable label, and a backend specific error when
+    /// the platform cannot generate or use a key-encryption key.
+    fn store(&self, label: &str, key: &MasterKey) -> Result<WrappedMasterKey>;
+
+    /// Unwraps `wrapped` with the key-encryption key stored under `label`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyNotFound`] when the label holds no key-encryption key, and
+    /// [`Error::InvalidWrappedKey`] when the bytes do not unwrap — a damaged blob, or one
+    /// produced by another key store entry. The method never returns bytes it could not
+    /// authenticate.
+    fn load(&self, label: &str, wrapped: &WrappedMasterKey) -> Result<MasterKey>;
+
+    /// Deletes the key-encryption key stored under `label`.
+    ///
+    /// # Warning
+    ///
+    /// Every blob wrapped with that KEK becomes permanently unusable, which is the point of
+    /// the operation: it is how a device forgets a master key.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyNotFound`] when the label holds no key-encryption key.
+    fn delete(&self, label: &str) -> Result<()>;
+}
+
+/// Compares two byte strings in constant time.
+///
+/// Used where this crate has to check that a platform handed back exactly the material it was
+/// given. `subtle` is already a dependency through `p256`, and this is the same crate
+/// implementations use for secret comparison; a hand written loop would be at the mercy of
+/// the optimiser.
+///
+/// Compiled under the same `cfg` as the backends that call it: on a platform with no such
+/// backend the function would be dead code, which `-D warnings` treats as an error.
+#[cfg(any(test, feature = "mock", target_os = "windows", target_os = "android"))]
+#[must_use]
+pub(crate) fn secrets_equal(a: &[u8], b: &[u8]) -> bool {
+    use p256::elliptic_curve::subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
+}
+
 /// Computes a SHA-256 digest.
 ///
 /// A single definition of the hash used in message mode: signing and verification
@@ -329,5 +603,55 @@ mod tests {
         assert!(public_key_from_sec1(&[]).is_err());
         assert!(public_key_from_sec1(&[0x04; PUBLIC_KEY_LEN - 1]).is_err());
         assert!(public_key_from_sec1(&[0x04; PUBLIC_KEY_LEN + 1]).is_err());
+    }
+
+    /// A master key keeps exactly the bytes it was built from.
+    #[test]
+    fn master_key_round_trips_its_bytes() {
+        let bytes = [0xA5_u8; MASTER_KEY_LEN];
+        let key = MasterKey::from_bytes(bytes);
+        assert_eq!(key.as_bytes(), &bytes);
+    }
+
+    /// `Debug` of a master key must not contain the material in any spelling.
+    ///
+    /// Both the decimal and the hexadecimal rendering are checked, because either one is
+    /// enough to read the key out of a log.
+    #[test]
+    fn master_key_debug_does_not_show_the_material() {
+        let bytes = [0x5A_u8; MASTER_KEY_LEN];
+        let text = format!("{:?}", MasterKey::from_bytes(bytes));
+        assert!(
+            !text.contains("90") && !text.contains("5A") && !text.contains("5a"),
+            "the debug output of a master key shows its material: {text}"
+        );
+        assert!(
+            text.contains("MasterKey"),
+            "the debug output does not name the type: {text}"
+        );
+    }
+
+    /// A wrapped blob is not secret, but its debug output is still only a length.
+    #[test]
+    fn wrapped_master_key_debug_shows_only_the_length() {
+        let wrapped = WrappedMasterKey::from_bytes(vec![0x33_u8; 20]);
+        let text = format!("{wrapped:?}");
+        assert!(text.contains("20"), "the length is missing: {text}");
+        assert!(
+            !text.contains("51") && !text.contains("33"),
+            "the debug output shows the bytes: {text}"
+        );
+        assert_eq!(wrapped.as_bytes().len(), 20);
+        assert_eq!(wrapped.into_bytes().len(), 20);
+    }
+
+    /// The constant-time comparison agrees with `==`, including on different lengths.
+    #[test]
+    fn secrets_equal_matches_equality() {
+        assert!(secrets_equal(b"abc", b"abc"));
+        assert!(secrets_equal(b"", b""));
+        assert!(!secrets_equal(b"abc", b"abd"));
+        assert!(!secrets_equal(b"abc", b"ab"));
+        assert!(!secrets_equal(b"ab", b"abc"));
     }
 }

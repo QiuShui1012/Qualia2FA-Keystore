@@ -216,6 +216,53 @@ pub enum Error {
         actual: usize,
     },
 
+    /// The wrapped master key could not be turned back into a master key.
+    ///
+    /// # This is not a hardware fault
+    ///
+    /// The bytes are damaged, or they were produced by a different key-encryption key (a
+    /// restored file, a key store that was re-created, a different device). Retrying and
+    /// changing machine do not help, so the variant is deliberately not classified as
+    /// environmental: what the caller has to offer the user is a recovery path, not a
+    /// different computer.
+    ///
+    /// `code` is the platform's own numeric code where it has one, and `0` where it does not
+    /// (the in-memory backend). The code is kept for diagnostics for the same reason
+    /// [`Error::Hardware`] keeps it: a native code is the only handle available for looking
+    /// a failure up in vendor documentation.
+    #[error("the wrapped master key cannot be unwrapped ({reason}, native code 0x{code:08X})")]
+    InvalidWrappedKey {
+        /// Fixed reason description. Contains no key material.
+        reason: &'static str,
+        /// Raw platform error code, or `0` when the backend reports none.
+        code: i32,
+    },
+
+    /// The platform key store returned something that is not master key material.
+    ///
+    /// An internal inconsistency rather than a user error: the store was asked for the
+    /// material it holds, and what came back has the wrong shape. Reported instead of being
+    /// truncated or padded, because a master key of the wrong length would fail later in a
+    /// place that no longer points here.
+    #[error("the platform key store returned an invalid master key: {reason}")]
+    InvalidMasterKey {
+        /// Fixed reason description. Contains no key material.
+        reason: &'static str,
+    },
+
+    /// The platform key store holds the entry but will not return its material.
+    ///
+    /// This is the failure mode of the **direct** form — "the store holds the material and
+    /// hands it back" — on a platform whose key store protects a key by never letting its
+    /// material out. The entry is unusable for that form, and the honest answer is this
+    /// error rather than a store that silently keeps something the caller can never read
+    /// again. The wrapped form exists for exactly this situation.
+    #[error("the platform key store will not return the stored material: {reason}")]
+    KeyNotExportable {
+        /// Fixed reason description. Contains no key material.
+        reason: &'static str,
+    },
+
     /// The OS random source is unavailable.
     ///
     /// Can only occur with the `mock` backend; real backends leave randomness to the hardware,
@@ -382,6 +429,49 @@ mod tests {
     fn implements_std_error() {
         fn assert_is_std_error<E: std::error::Error>() {}
         assert_is_std_error::<Error>();
+    }
+
+    /// A blob that does not unwrap and a store that will not hand the material back are
+    /// **not** environment problems.
+    ///
+    /// Both are answered by offering the user a recovery path or a different form, never by
+    /// telling them to try another machine, which is what `is_environmental` means.
+    #[test]
+    fn master_key_failures_are_not_environmental() {
+        let cases = [
+            Error::InvalidWrappedKey {
+                reason: "the authentication tag does not match",
+                code: 0x8009_0027_u32 as i32,
+            },
+            Error::InvalidMasterKey {
+                reason: "the material is not 32 bytes long",
+            },
+            Error::KeyNotExportable {
+                reason: "the key store refuses to export the private key",
+            },
+        ];
+        for error in &cases {
+            assert!(
+                !error.is_environmental(),
+                "{error:?} must not be classified as environmental"
+            );
+            assert!(
+                !error.is_missing_hardware(),
+                "{error:?} must not be classified as missing hardware"
+            );
+        }
+    }
+
+    /// The message of an unwrapping failure carries the native code in hexadecimal, the
+    /// same way a [`Error::Hardware`] does.
+    #[test]
+    fn invalid_wrapped_key_shows_the_native_code() {
+        let text = Error::InvalidWrappedKey {
+            reason: "the platform rejected the bytes",
+            code: 0x8009_0027_u32 as i32,
+        }
+        .to_string();
+        assert!(text.contains("80090027"), "actual: {text}");
     }
 
     /// Error messages carry locatable numeric values and never panic.

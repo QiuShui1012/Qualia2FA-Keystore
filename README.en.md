@@ -18,7 +18,7 @@ space.
 | Module | Does | Holds the private key |
 |--------|------|-----------------------|
 | `device` | Public key representation, device fingerprint (`DeviceId`), verification | No |
-| `keystore` | Key generation, public key lookup, signing | Yes (inside the hardware) |
+| `keystore` | Key generation, public key lookup, signing, application master key storage | Yes (inside the hardware) |
 
 Both halves share one error type. They are separate for a practical reason: **a device has
 to be able to verify somebody else's signature while holding no hardware key of its own**
@@ -44,12 +44,18 @@ device::verify(signer.public_key(), message, &signature)?;
 Implemented:
 
 - The abstraction: `DeviceKeyStore` / `DeviceSigner`, plus backend capability queries
+- The abstraction: `DirectMasterKeyStore` / `WrappedMasterKeyStore`, the two ways of holding
+  the application's master key
 - **Windows**: CNG `NCrypt*` + TPM 2.0 (`MS_PLATFORM_CRYPTO_PROVIDER`)
 - **Windows without a TPM**: the CNG software key store path
+- **Windows master keys**: the wrapped form prefers the TPM, the direct form lands on the
+  software key store (why: see below)
+- **Android master keys**: both forms on top of the Android Keystore (cross-compile checked
+  only, not verified on a device)
+- **Android**: Keystore / StrongBox
 - An in-memory backend for tests (the `mock` feature, **off by default**)
 
-Not implemented: macOS (Secure Enclave), Linux (TPM 2.0), Android (Keystore / StrongBox),
-iOS (Secure Enclave).
+Not implemented: macOS (Secure Enclave), Linux (TPM 2.0), iOS (Secure Enclave).
 
 > `DeviceKeyStore::backend` reports the backend a key store is **actually** using at run
 > time. On a Windows machine without a TPM it returns `Backend::Software`: the private key
@@ -63,6 +69,63 @@ iOS (Secure Enclave).
 > by group policy, key store in use), elsewhere it returns `Self` (the stub backend does
 > nothing and cannot fail). That is deliberate — a `Result` there would only make callers
 > write an error branch that is never taken.
+
+## Two ways to hold the master key
+
+Besides the device identity key, the platform key store holds the **application's master
+key** — the one a vault file is encrypted with. It is 32 bytes of opaque material in
+`MasterKey`: this crate only moves it between the caller and the platform and derives nothing
+from it. There are two ways to hold it, and **the caller picks by reaching for one of two
+types**, not by a runtime flag:
+
+| Form | Contract | What the platform store holds | What the caller persists |
+|---|---|---|---|
+| Direct | `DirectMasterKeyStore` | the material itself | nothing |
+| Wrapped | `WrappedMasterKeyStore` | a **non-exportable** KEK | the wrapped bytes it returns |
+
+```rust
+use qualia_dik::{
+    DirectMasterKeyStore, MasterKey, MockDirectMasterKeyStore, MockWrappedMasterKeyStore,
+    WrappedMasterKeyStore,
+};
+
+let key = MasterKey::from_bytes([0x2A; qualia_dik::MASTER_KEY_LEN]);
+
+// Direct: the store keeps the material, the caller persists nothing.
+let direct = MockDirectMasterKeyStore::new();
+direct.store("account-1", &key)?;
+let loaded = direct.load("account-1")?;
+
+// Wrapped: the store keeps a KEK, the caller keeps these bytes next to the vault.
+let wrapped_store = MockWrappedMasterKeyStore::new();
+let blob = wrapped_store.store("account-1", &key)?;
+let loaded_again = wrapped_store.load("account-1", &blob)?;
+
+assert_eq!(loaded.as_bytes(), loaded_again.as_bytes());
+```
+
+On a real platform the two `Mock*` types become `PlatformDirectMasterKeyStore` and
+`PlatformWrappedMasterKeyStore` (whose `open_best_available()` returns a `Result` on Windows,
+and likewise on Android).
+
+The KEK's encrypt and decrypt operations **do not appear in any interface**: there is no
+wrap, unwrap, encrypt or decrypt method, and nothing returns the key — wrapping is the
+internal design of this form. Both forms report what actually answered through `backend()`,
+and neither dresses a software backend up as hardware.
+
+| Platform | Direct | Wrapped |
+|---|---|---|
+| Windows | software key store (the TPM provider imports the key but refuses to export it — see below) | TPM where there is one, software otherwise |
+| Android | implemented, reports what the keystore says about the entry | implemented, StrongBox preferred |
+| Others | `UnsupportedPlatform` | `UnsupportedPlatform` |
+
+> One thing worth knowing on Windows: the **direct** form can only land on the software key
+> store, because the Microsoft Platform Crypto Provider accepts our key and then refuses to
+> export the material (`NTE_PERM`). A store that cannot return the material does not satisfy
+> the direct form's contract, so it reports `Backend::Software` truthfully; choose the
+> **wrapped** form when the master key has to be protected by the TPM. `Backend::Software`
+> means the key is an ordinary software key protected by the operating system account, and
+> the UI has to tell the user before critical operations.
 
 ## Using it in your own project
 

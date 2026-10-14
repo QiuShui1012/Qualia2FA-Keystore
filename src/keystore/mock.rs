@@ -36,10 +36,27 @@
 //!
 //! Private keys are wiped with `zeroize` on drop. Real backends have nothing to
 //! wipe, because their private keys never enter this process.
+//!
+//! # Master keys
+//!
+//! The store implements both ways of holding the application's master key, so that the
+//! protocol layer can be tested without a platform:
+//!
+//! - [`MockDirectMasterKeyStore`] keeps the material in a map;
+//! - [`MockWrappedMasterKeyStore`] keeps a key-encryption key per label in a map, wraps the
+//!   material with it and hands the ciphertext to the caller, exactly as a platform store
+//!   does.
+//!
+//! Neither has hardware protection, and neither claims any: both report
+//! [`Backend::Software`]. The wrapping of the second one is a test double built from SHA-256
+//! (HMAC per RFC 2104 §2) and must not be mistaken for a delivered cipher — a real backend
+//! wraps inside the platform, and the platform's implementation is the one that matters.
 
 use crate::device::{DevicePublicKey, DeviceSignature};
+use crate::keystore::traits::DirectMasterKeyStore;
 use crate::keystore::traits::{
-    Backend, DIGEST_LEN, DeviceKeyStore, DeviceSigner, public_key_from_sec1,
+    Backend, DIGEST_LEN, DeviceKeyStore, DeviceSigner, MASTER_KEY_LEN, MasterKey, WrappedMasterKey,
+    WrappedMasterKeyStore, public_key_from_sec1, secrets_equal,
 };
 use crate::{Error, Result};
 use p256::ecdsa::{Signature, SigningKey, signature::hazmat::PrehashSigner};
@@ -254,6 +271,266 @@ impl DeviceSigner for MockSigner {
     }
 }
 
+/// An in-memory key store holding the master key **directly**, for tests only.
+///
+/// The map is the whole "key store": the material sits in ordinary memory, so this type
+/// offers no protection whatsoever and reports [`Backend::Software`]. It exists so that the
+/// callers of the direct form can be tested on a machine without platform hardware, with the
+/// same three operations and the same errors a real store produces.
+///
+/// Cloning shares the same storage, mirroring how a real key store shows the same keys to
+/// every handle on one machine.
+#[derive(Clone, Default)]
+pub struct MockDirectMasterKeyStore {
+    /// Label → material, behind `Arc<Mutex<_>>` so clones share it.
+    keys: Arc<Mutex<BTreeMap<String, MasterKey>>>,
+}
+
+/// Prints the number of stored keys only, never a label's material.
+impl core::fmt::Debug for MockDirectMasterKeyStore {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let count = self.keys.lock().map(|k| k.len()).unwrap_or(0);
+        f.debug_struct("MockDirectMasterKeyStore")
+            .field("key_count", &count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MockDirectMasterKeyStore {
+    /// Creates an empty store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl DirectMasterKeyStore for MockDirectMasterKeyStore {
+    /// Reports [`Backend::Software`]: the material is in this process's memory.
+    fn backend(&self) -> Backend {
+        Backend::Software
+    }
+
+    /// Inserts the material, replacing whatever was stored under `label`.
+    fn store(&self, label: &str, key: &MasterKey) -> Result<()> {
+        let mut keys = self.lock()?;
+        keys.insert(label.to_string(), key.clone());
+        Ok(())
+    }
+
+    /// Copies the material out, or reports [`Error::KeyNotFound`].
+    fn load(&self, label: &str) -> Result<MasterKey> {
+        let keys = self.lock()?;
+        keys.get(label).cloned().ok_or_else(|| Error::KeyNotFound {
+            label: label.to_string(),
+        })
+    }
+
+    /// Removes the entry, or reports [`Error::KeyNotFound`].
+    fn delete(&self, label: &str) -> Result<()> {
+        let mut keys = self.lock()?;
+        if keys.remove(label).is_none() {
+            return Err(Error::KeyNotFound {
+                label: label.to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl MockDirectMasterKeyStore {
+    /// Locks the map, turning a poisoned mutex into an error rather than a panic.
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<String, MasterKey>>> {
+        self.keys.lock().map_err(|_| Error::Hardware {
+            operation: "MockDirectMasterKeyStore mutex poisoned",
+            code: 0,
+        })
+    }
+}
+
+/// An in-memory key store holding the master key **wrapped**, for tests only.
+///
+/// It generates a random key-encryption key per label on first use and keeps it in a map, so
+/// the KEK is never handed out through any interface and the caller only ever sees the
+/// wrapped bytes — the same shape a platform backend has. It reports
+/// [`Backend::Software`]: nothing here is hardware protected.
+///
+/// The wrapping is a test double: a keystream derived from the KEK by HMAC-SHA256 hides the
+/// material, and a second HMAC authenticates it, so a wrong KEK or a damaged blob fails
+/// instead of yielding wrong bytes. A real backend wraps inside the platform key store.
+#[derive(Clone, Default)]
+pub struct MockWrappedMasterKeyStore {
+    /// Label → key-encryption key, behind `Arc<Mutex<_>>` so clones share it.
+    keks: Arc<Mutex<BTreeMap<String, MasterKey>>>,
+}
+
+/// Prints the number of stored keys only, never a key-encryption key.
+impl core::fmt::Debug for MockWrappedMasterKeyStore {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let count = self.keks.lock().map(|k| k.len()).unwrap_or(0);
+        f.debug_struct("MockWrappedMasterKeyStore")
+            .field("kek_count", &count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MockWrappedMasterKeyStore {
+    /// Creates an empty store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Locks the KEK map, turning a poisoned mutex into an error rather than a panic.
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<String, MasterKey>>> {
+        self.keks.lock().map_err(|_| Error::Hardware {
+            operation: "MockWrappedMasterKeyStore mutex poisoned",
+            code: 0,
+        })
+    }
+}
+
+impl WrappedMasterKeyStore for MockWrappedMasterKeyStore {
+    /// Reports [`Backend::Software`].
+    fn backend(&self) -> Backend {
+        Backend::Software
+    }
+
+    /// Wraps `key` with this label's KEK, generating the KEK on first use.
+    fn store(&self, label: &str, key: &MasterKey) -> Result<WrappedMasterKey> {
+        use std::collections::btree_map::Entry;
+
+        let mut keks = self.lock()?;
+        let kek = match keks.entry(label.to_string()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(MasterKey::from_bytes(random_scalar()?)),
+        };
+
+        let mut nonce = [0_u8; MOCK_NONCE_LEN];
+        getrandom::fill(&mut nonce).map_err(|_| Error::Hardware {
+            operation: "MockWrappedMasterKeyStore could not obtain randomness from the OS",
+            code: 0,
+        })?;
+
+        let mut sealed = [0_u8; MASTER_KEY_LEN];
+        let keystream = hmac_sha256(kek.as_bytes(), &[KEYSTREAM_CONTEXT, &nonce].concat());
+        for (out, (mask, byte)) in sealed
+            .iter_mut()
+            .zip(keystream.iter().zip(key.as_bytes().iter()))
+        {
+            *out = mask ^ byte;
+        }
+        let tag = hmac_sha256(kek.as_bytes(), &[TAG_CONTEXT, &nonce, &sealed].concat());
+
+        let mut wrapped = Vec::with_capacity(MOCK_WRAPPED_LEN);
+        wrapped.extend_from_slice(&nonce);
+        wrapped.extend_from_slice(&sealed);
+        wrapped.extend_from_slice(&tag);
+        Ok(WrappedMasterKey::from_bytes(wrapped))
+    }
+
+    /// Unwraps `wrapped` with this label's KEK.
+    ///
+    /// The authentication tag is checked before anything is decrypted, so a blob that was
+    /// damaged or produced by another KEK is rejected rather than turned into 32 bytes that
+    /// merely look like a master key.
+    fn load(&self, label: &str, wrapped: &WrappedMasterKey) -> Result<MasterKey> {
+        let bytes = wrapped.as_bytes();
+        if bytes.len() != MOCK_WRAPPED_LEN {
+            return Err(Error::InvalidWrappedKey {
+                reason: "the wrapped master key is not 96 bytes long",
+                code: 0,
+            });
+        }
+        let (nonce, rest) = bytes.split_at(MOCK_NONCE_LEN);
+        let (sealed, tag) = rest.split_at(MASTER_KEY_LEN);
+
+        let keks = self.lock()?;
+        let kek = keks.get(label).ok_or_else(|| Error::KeyNotFound {
+            label: label.to_string(),
+        })?;
+
+        let expected = hmac_sha256(kek.as_bytes(), &[TAG_CONTEXT, nonce, sealed].concat());
+        if !secrets_equal(&expected, tag) {
+            return Err(Error::InvalidWrappedKey {
+                reason: "the authentication tag does not match (a damaged blob, or one wrapped by a different key-encryption key)",
+                code: 0,
+            });
+        }
+
+        let mut material = [0_u8; MASTER_KEY_LEN];
+        let keystream = hmac_sha256(kek.as_bytes(), &[KEYSTREAM_CONTEXT, nonce].concat());
+        for (out, (mask, byte)) in material.iter_mut().zip(keystream.iter().zip(sealed.iter())) {
+            *out = mask ^ byte;
+        }
+        Ok(MasterKey::from_bytes(material))
+    }
+
+    /// Deletes the label's KEK, which makes every blob wrapped with it unusable.
+    fn delete(&self, label: &str) -> Result<()> {
+        let mut keks = self.lock()?;
+        if keks.remove(label).is_none() {
+            return Err(Error::KeyNotFound {
+                label: label.to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Length of the nonce a wrapped blob starts with, in bytes.
+const MOCK_NONCE_LEN: usize = 32;
+
+/// Length of a wrapped blob: nonce, sealed material and authentication tag.
+const MOCK_WRAPPED_LEN: usize = MOCK_NONCE_LEN + MASTER_KEY_LEN + 32;
+
+/// Domain separator of the keystream, so that the keystream and the tag can never be the
+/// same HMAC of the same input.
+const KEYSTREAM_CONTEXT: &[u8] = b"qualia-dik/mock/keystream/v1";
+
+/// Domain separator of the authentication tag.
+const TAG_CONTEXT: &[u8] = b"qualia-dik/mock/tag/v1";
+
+/// The block size of SHA-256 in bytes: the hash processes 512-bit blocks (FIPS 180-4 §1).
+const SHA256_BLOCK_LEN: usize = 64;
+
+/// HMAC-SHA256 of `message` under `key` (RFC 2104 §2).
+///
+/// The construction is the RFC's, not an invention: the key is reduced to the block size,
+/// padded with zeros, and used as the two pads of the nested hashes. It exists because the
+/// test double needs a keyed function, and `sha2` is already here.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    let mut block = [0_u8; SHA256_BLOCK_LEN];
+    if key.len() > SHA256_BLOCK_LEN {
+        let digest = Sha256::digest(key);
+        block[..digest.len()].copy_from_slice(&digest);
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner = Sha256::new();
+    let mut pad = [0x36_u8; SHA256_BLOCK_LEN];
+    for (byte, key_byte) in pad.iter_mut().zip(block.iter()) {
+        *byte ^= key_byte;
+    }
+    inner.update(pad);
+    inner.update(message);
+    let inner = inner.finalize();
+
+    let mut outer = Sha256::new();
+    let mut pad = [0x5C_u8; SHA256_BLOCK_LEN];
+    for (byte, key_byte) in pad.iter_mut().zip(block.iter()) {
+        *byte ^= key_byte;
+    }
+    outer.update(pad);
+    outer.update(inner);
+
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(&outer.finalize());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +665,263 @@ mod tests {
         assert!(!store.backend().is_hardware_backed());
         let signer = store.create("device").expect("create");
         assert_eq!(signer.backend(), Backend::Software);
+    }
+
+    /// HMAC-SHA256 matches the two first test vectors of RFC 4231 §4.
+    ///
+    /// The test double's wrapping rests on this function, and a hand written keyed hash is
+    /// exactly the kind of code that is wrong in a way that still "looks random". The
+    /// vectors are the specification's, not values taken from this implementation.
+    #[test]
+    fn hmac_sha256_matches_rfc4231() {
+        let case1 = hmac_sha256(&[0x0B_u8; 20], b"Hi There");
+        assert_eq!(
+            case1,
+            [
+                0xB0, 0x34, 0x4C, 0x61, 0xD8, 0xDB, 0x38, 0x53, 0x5C, 0xA8, 0xAF, 0xCE, 0xAF, 0x0B,
+                0xF1, 0x2B, 0x88, 0x1D, 0xC2, 0x00, 0xC9, 0x83, 0x3D, 0xA7, 0x26, 0xE9, 0x37, 0x6C,
+                0x2E, 0x32, 0xCF, 0xF7,
+            ]
+        );
+
+        let case2 = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        assert_eq!(
+            case2,
+            [
+                0x5B, 0xDC, 0xC1, 0x46, 0xBF, 0x60, 0x75, 0x4E, 0x6A, 0x04, 0x24, 0x26, 0x08, 0x95,
+                0x75, 0xC7, 0x5A, 0x00, 0x3F, 0x08, 0x9D, 0x27, 0x39, 0x83, 0x9D, 0xEC, 0x58, 0xB9,
+                0x64, 0xEC, 0x38, 0x43,
+            ]
+        );
+
+        let long_key = hmac_sha256(
+            &[0xAA_u8; 131],
+            b"Test Using Larger Than Block-Size Key - Hash Key First",
+        );
+        assert_eq!(
+            long_key,
+            [
+                0x60, 0xE4, 0x31, 0x59, 0x1E, 0xE0, 0xB6, 0x7F, 0x0D, 0x8A, 0x26, 0xAA, 0xCB, 0xF5,
+                0xB7, 0x7F, 0x8E, 0x0B, 0xC6, 0x21, 0x37, 0x28, 0xC5, 0x14, 0x05, 0x46, 0x04, 0x0F,
+                0x0E, 0xE3, 0x7F, 0x54,
+            ]
+        );
+    }
+
+    /// Whether two master keys hold the same material, without printing either one.
+    fn same_secret(a: &MasterKey, b: &MasterKey) -> bool {
+        secrets_equal(a.as_bytes(), b.as_bytes())
+    }
+
+    /// The direct form round-trips the material.
+    #[test]
+    fn direct_form_round_trips() {
+        let store = MockDirectMasterKeyStore::new();
+        let key = MasterKey::from_bytes([0x11_u8; MASTER_KEY_LEN]);
+        store.store("account-1", &key).expect("store");
+
+        let loaded = store.load("account-1").expect("load");
+        assert!(
+            same_secret(&loaded, &key),
+            "the material read back differs from the material stored"
+        );
+    }
+
+    /// The direct form reports software, and a missing label is `KeyNotFound`.
+    #[test]
+    fn direct_form_is_honest_and_reports_missing_keys() {
+        let store = MockDirectMasterKeyStore::new();
+        assert_eq!(store.backend(), Backend::Software);
+        assert!(!store.backend().is_hardware_backed());
+
+        let error = store.load("nothing").expect_err("must fail");
+        assert!(matches!(error, Error::KeyNotFound { .. }));
+        let error = store.delete("nothing").expect_err("must fail");
+        assert!(matches!(error, Error::KeyNotFound { .. }));
+    }
+
+    /// Storing twice replaces the material, and deleting removes it.
+    #[test]
+    fn direct_form_replaces_and_deletes() {
+        let store = MockDirectMasterKeyStore::new();
+        let first = MasterKey::from_bytes([0x22_u8; MASTER_KEY_LEN]);
+        let second = MasterKey::from_bytes([0x33_u8; MASTER_KEY_LEN]);
+
+        store.store("account-1", &first).expect("store");
+        store.store("account-1", &second).expect("store again");
+        let loaded = store.load("account-1").expect("load");
+        assert!(
+            same_secret(&loaded, &second),
+            "storing again must replace the material that was there"
+        );
+
+        store.delete("account-1").expect("delete");
+        assert!(matches!(
+            store.load("account-1"),
+            Err(Error::KeyNotFound { .. })
+        ));
+    }
+
+    /// A clone shares the storage, which stands for reopening on the same machine.
+    #[test]
+    fn direct_form_clone_shares_storage() {
+        let store = MockDirectMasterKeyStore::new();
+        let key = MasterKey::from_bytes([0x44_u8; MASTER_KEY_LEN]);
+        store.store("account-1", &key).expect("store");
+
+        let other = store.clone();
+        let loaded = other.load("account-1").expect("load");
+        assert!(same_secret(&loaded, &key));
+    }
+
+    /// The wrapped form round-trips, and the wrapped bytes are not the material.
+    #[test]
+    fn wrapped_form_round_trips() {
+        let store = MockWrappedMasterKeyStore::new();
+        let key = MasterKey::from_bytes([0x55_u8; MASTER_KEY_LEN]);
+
+        let wrapped = store.store("account-1", &key).expect("wrap");
+        assert_eq!(wrapped.as_bytes().len(), MOCK_WRAPPED_LEN);
+        assert!(
+            !wrapped
+                .as_bytes()
+                .windows(MASTER_KEY_LEN)
+                .any(|w| w == key.as_bytes()),
+            "the persisted bytes contain the master key in the clear"
+        );
+
+        let loaded = store.load("account-1", &wrapped).expect("unwrap");
+        assert!(
+            same_secret(&loaded, &key),
+            "the material read back differs from the material wrapped"
+        );
+    }
+
+    /// The wrapped form reports software and reports missing labels.
+    #[test]
+    fn wrapped_form_is_honest_and_reports_missing_keys() {
+        let store = MockWrappedMasterKeyStore::new();
+        assert_eq!(store.backend(), Backend::Software);
+        assert!(!store.backend().is_hardware_backed());
+
+        let error = store.delete("nothing").expect_err("must fail");
+        assert!(matches!(error, Error::KeyNotFound { .. }));
+
+        let key = MasterKey::from_bytes([0x66_u8; MASTER_KEY_LEN]);
+        let wrapped = store.store("account-1", &key).expect("wrap");
+        store.delete("account-1").expect("delete the KEK");
+
+        let error = store.load("account-1", &wrapped).expect_err("must fail");
+        assert!(matches!(error, Error::KeyNotFound { .. }));
+    }
+
+    /// A damaged blob fails instead of returning 32 bytes that are not the master key.
+    #[test]
+    fn wrapped_form_rejects_a_damaged_blob() {
+        let store = MockWrappedMasterKeyStore::new();
+        let key = MasterKey::from_bytes([0x77_u8; MASTER_KEY_LEN]);
+        let wrapped = store.store("account-1", &key).expect("wrap");
+
+        for index in [
+            0_usize,
+            MOCK_NONCE_LEN,
+            MOCK_NONCE_LEN + 5,
+            MOCK_WRAPPED_LEN - 1,
+        ] {
+            let mut bytes = wrapped.as_bytes().to_vec();
+            bytes[index] ^= 0x01;
+            let damaged = WrappedMasterKey::from_bytes(bytes);
+            let error = store
+                .load("account-1", &damaged)
+                .expect_err("a damaged blob must be rejected");
+            assert!(
+                matches!(error, Error::InvalidWrappedKey { .. }),
+                "wrong error for a blob damaged at byte {index}: {error:?}"
+            );
+        }
+
+        let truncated =
+            WrappedMasterKey::from_bytes(wrapped.as_bytes()[..MOCK_WRAPPED_LEN - 1].to_vec());
+        assert!(matches!(
+            store.load("account-1", &truncated),
+            Err(Error::InvalidWrappedKey { .. })
+        ));
+    }
+
+    /// A blob wrapped by another KEK is rejected, which is what a regenerated key store
+    /// looks like to a restored file.
+    #[test]
+    fn wrapped_form_rejects_a_blob_from_another_kek() {
+        let store = MockWrappedMasterKeyStore::new();
+        let key = MasterKey::from_bytes([0x88_u8; MASTER_KEY_LEN]);
+        let wrapped = store.store("account-1", &key).expect("wrap");
+
+        store.delete("account-1").expect("delete the KEK");
+        let _ = store.store("account-1", &key).expect("wrap with a new KEK");
+
+        let error = store
+            .load("account-1", &wrapped)
+            .expect_err("a blob from the previous KEK must be rejected");
+        assert!(matches!(error, Error::InvalidWrappedKey { .. }));
+    }
+
+    /// Two labels get two key-encryption keys, so one label's blob is not another's.
+    #[test]
+    fn wrapped_form_keeps_labels_apart() {
+        let store = MockWrappedMasterKeyStore::new();
+        let key = MasterKey::from_bytes([0x99_u8; MASTER_KEY_LEN]);
+        let wrapped = store.store("account-1", &key).expect("wrap");
+
+        let error = store
+            .load("account-2", &wrapped)
+            .expect_err("another label has no key-encryption key");
+        assert!(matches!(error, Error::KeyNotFound { .. }));
+
+        let _ = store
+            .store("account-2", &key)
+            .expect("wrap under a second label");
+        let error = store
+            .load("account-2", &wrapped)
+            .expect_err("the second label's KEK differs, so the blob must be rejected");
+        assert!(matches!(error, Error::InvalidWrappedKey { .. }));
+    }
+
+    /// Storing again under a label keeps the KEK, so previously persisted bytes still work.
+    #[test]
+    fn wrapped_form_reuses_the_kek() {
+        let store = MockWrappedMasterKeyStore::new();
+        let first = MasterKey::from_bytes([0xAA_u8; MASTER_KEY_LEN]);
+        let second = MasterKey::from_bytes([0xBB_u8; MASTER_KEY_LEN]);
+
+        let wrapped_first = store.store("account-1", &first).expect("wrap");
+        let wrapped_second = store.store("account-1", &second).expect("wrap again");
+
+        let loaded = store.load("account-1", &wrapped_second).expect("unwrap");
+        assert!(same_secret(&loaded, &second));
+        let loaded = store.load("account-1", &wrapped_first).expect("unwrap");
+        assert!(
+            same_secret(&loaded, &first),
+            "wrapping again must not invalidate the bytes persisted earlier"
+        );
+    }
+
+    /// No `Debug` output of either store shows key material.
+    #[test]
+    fn master_key_stores_do_not_leak_through_debug() {
+        let direct = MockDirectMasterKeyStore::new();
+        let key = MasterKey::from_bytes([0xCC_u8; MASTER_KEY_LEN]);
+        direct.store("account-1", &key).expect("store");
+
+        let wrapped_store = MockWrappedMasterKeyStore::new();
+        let wrapped = wrapped_store.store("account-1", &key).expect("wrap");
+
+        let rendered = format!(
+            "{direct:?} {wrapped_store:?} {key:?} {wrapped:?} {}",
+            direct.load("account-1").expect("load").as_bytes().len()
+        );
+        assert!(
+            !rendered.contains("204") && !rendered.contains("CC") && !rendered.contains("cc"),
+            "a debug output shows master key material: {rendered}"
+        );
     }
 }

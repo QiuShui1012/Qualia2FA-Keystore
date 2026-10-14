@@ -213,6 +213,36 @@ pub(super) fn byte_array<'local>(
     object_bytes(env, array, operation)
 }
 
+/// Calls a method whose `byte[]` result is authenticated, and reports a failed
+/// authentication as [`Error::InvalidWrappedKey`].
+///
+/// # Why the failure is recognised by name
+///
+/// The platform reports a damaged authenticated ciphertext by **throwing**
+/// `AEADBadTagException`; a Java exception carries no numeric code, and its class is the only
+/// stable part of it. Folding every failure into "the bytes are damaged" would hide a
+/// keystore that is genuinely broken behind a message about the caller's data, so only that
+/// one class is translated and everything else is reported as the platform described it.
+pub(super) fn byte_array_authenticated<'local>(
+    env: &mut JNIEnv<'local>,
+    target: &JObject<'local>,
+    name: &str,
+    signature: &str,
+    args: &[JValue<'local, '_>],
+    operation: &'static str,
+) -> Result<Vec<u8>> {
+    match byte_array(env, target, name, signature, args, operation) {
+        Ok(bytes) => Ok(bytes),
+        Err(Error::Jni { detail, .. }) if detail.contains("AEADBadTag") => {
+            Err(crate::Error::InvalidWrappedKey {
+                reason: "the platform rejected the authentication tag (a damaged blob, or one wrapped by a different key)",
+                code: 0,
+            })
+        }
+        Err(other) => Err(other),
+    }
+}
+
 /// Calls an instance method that returns a `boolean`.
 pub(super) fn boolean<'local>(
     env: &mut JNIEnv<'local>,

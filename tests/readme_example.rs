@@ -102,3 +102,31 @@ fn readme_mock_example_compiles_and_runs() {
     let signature = signer.sign(message).expect("sign");
     qualia_dik::device::verify(signer.public_key(), message, &signature).expect("verify");
 }
+
+/// The master key example from the README "Two ways to hold the master key"
+/// section, copied line by line.
+///
+/// `?` becomes `expect`, because the test function does not return a `Result`;
+/// the types and the call order are still checked. Requires no platform: the two
+/// `Mock*` stores stand in for the platform ones. Failure means the documented
+/// example no longer compiles or no longer runs.
+#[cfg(feature = "mock")]
+#[test]
+fn readme_master_key_example_compiles_and_runs() {
+    use qualia_dik::{
+        DirectMasterKeyStore, MasterKey, MockDirectMasterKeyStore, MockWrappedMasterKeyStore,
+        WrappedMasterKeyStore,
+    };
+
+    let key = MasterKey::from_bytes([0x2A; qualia_dik::MASTER_KEY_LEN]);
+
+    let direct = MockDirectMasterKeyStore::new();
+    direct.store("account-1", &key).expect("store");
+    let loaded = direct.load("account-1").expect("load");
+
+    let wrapped_store = MockWrappedMasterKeyStore::new();
+    let blob = wrapped_store.store("account-1", &key).expect("wrap");
+    let loaded_again = wrapped_store.load("account-1", &blob).expect("unwrap");
+
+    assert_eq!(loaded.as_bytes(), loaded_again.as_bytes());
+}

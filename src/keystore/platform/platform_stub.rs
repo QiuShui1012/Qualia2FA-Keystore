@@ -41,7 +41,10 @@
 
 use core::fmt;
 
-use crate::keystore::traits::{Backend, DeviceKeyStore};
+use crate::keystore::traits::{
+    Backend, DeviceKeyStore, DirectMasterKeyStore, MasterKey, WrappedMasterKey,
+    WrappedMasterKeyStore,
+};
 use crate::{Error, Result};
 
 /// Placeholder storage provider.
@@ -130,6 +133,80 @@ impl fmt::Display for StubKeyStore {
     }
 }
 
+/// Master key store of the **direct** form on platforms without a backend.
+///
+/// Every operation returns [`crate::Error::UnsupportedPlatform`], and
+/// [`DirectMasterKeyStore::backend`] answers [`Backend::Unavailable`]. Nothing is
+/// substituted: a caller on such a platform has to be told that the master key cannot be
+/// held here, not handed an in-process map that looks like a key store.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StubDirectMasterKeyStore;
+
+impl StubDirectMasterKeyStore {
+    /// Constructs the placeholder store.
+    ///
+    /// No arguments, because it holds nothing; the signature matches the real backends so
+    /// that callers initialize every platform the same way.
+    #[must_use]
+    pub const fn open_best_available() -> Self {
+        Self
+    }
+}
+
+impl DirectMasterKeyStore for StubDirectMasterKeyStore {
+    /// Always [`Backend::Unavailable`]: no provider answered, and none exists.
+    fn backend(&self) -> Backend {
+        Backend::Unavailable
+    }
+
+    fn store(&self, _label: &str, _key: &MasterKey) -> Result<()> {
+        Err(StubKeyStore::unsupported())
+    }
+
+    fn load(&self, _label: &str) -> Result<MasterKey> {
+        Err(StubKeyStore::unsupported())
+    }
+
+    fn delete(&self, _label: &str) -> Result<()> {
+        Err(StubKeyStore::unsupported())
+    }
+}
+
+/// Master key store of the **wrapped** form on platforms without a backend.
+///
+/// Every operation returns [`crate::Error::UnsupportedPlatform`]. A platform that cannot
+/// hold a non-exportable key-encryption key cannot offer this form either, and saying so is
+/// the whole implementation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StubWrappedMasterKeyStore;
+
+impl StubWrappedMasterKeyStore {
+    /// Constructs the placeholder store.
+    #[must_use]
+    pub const fn open_best_available() -> Self {
+        Self
+    }
+}
+
+impl WrappedMasterKeyStore for StubWrappedMasterKeyStore {
+    /// Always [`Backend::Unavailable`].
+    fn backend(&self) -> Backend {
+        Backend::Unavailable
+    }
+
+    fn store(&self, _label: &str, _key: &MasterKey) -> Result<WrappedMasterKey> {
+        Err(StubKeyStore::unsupported())
+    }
+
+    fn load(&self, _label: &str, _wrapped: &WrappedMasterKey) -> Result<MasterKey> {
+        Err(StubKeyStore::unsupported())
+    }
+
+    fn delete(&self, _label: &str) -> Result<()> {
+        Err(StubKeyStore::unsupported())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +260,42 @@ mod tests {
             "the text does not say the backend is missing: {text}"
         );
         assert!(!text.is_empty());
+    }
+
+    /// Both master key forms report unavailable and fail, rather than pretending to hold
+    /// anything.
+    #[test]
+    fn master_key_forms_report_unsupported() {
+        let direct = StubDirectMasterKeyStore::open_best_available();
+        assert_eq!(direct.backend(), Backend::Unavailable);
+        assert!(!direct.backend().is_hardware_backed());
+        let key = MasterKey::from_bytes([0x01_u8; crate::keystore::MASTER_KEY_LEN]);
+
+        let results: [Result<()>; 4] = [
+            direct.store("account-1", &key),
+            direct.load("account-1").map(|_| ()),
+            direct.delete("account-1"),
+            StubWrappedMasterKeyStore::open_best_available().delete("account-1"),
+        ];
+        for result in results {
+            match result {
+                Err(Error::UnsupportedPlatform { platform }) => {
+                    assert!(!platform.is_empty(), "the platform name must not be empty");
+                }
+                other => panic!("expected UnsupportedPlatform, got {other:?}"),
+            }
+        }
+
+        let wrapped = StubWrappedMasterKeyStore::open_best_available();
+        assert_eq!(wrapped.backend(), Backend::Unavailable);
+        let error = wrapped
+            .store("account-1", &key)
+            .expect_err("must be unsupported");
+        assert!(matches!(error, Error::UnsupportedPlatform { .. }));
+        let empty = WrappedMasterKey::from_bytes(Vec::new());
+        let error = wrapped
+            .load("account-1", &empty)
+            .expect_err("must be unsupported");
+        assert!(matches!(error, Error::UnsupportedPlatform { .. }));
     }
 }

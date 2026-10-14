@@ -15,7 +15,7 @@ English version: [README.en.md](README.en.md).
 | 模块 | 做什么 | 持私钥吗 |
 |------|--------|----------|
 | `device` | 公钥表示、设备指纹（`DeviceId`）、验签 | 否 |
-| `keystore` | 生成密钥、取公钥、对消息签名 | 是（在硬件里） |
+| `keystore` | 生成密钥、取公钥、对消息签名、存放应用主密钥 | 是（在硬件里） |
 
 两者共用同一个错误类型。分开的原因很实际：**一台设备必须能验证别人的签名，而它
 自己可能根本不持有任何硬件密钥**（没有 TPM 的桌面机就是这样）。
@@ -40,12 +40,15 @@ device::verify(signer.public_key(), message, &signature)?;
 已实现：
 
 - 抽象层：`DeviceKeyStore` / `DeviceSigner`，以及后端能力查询
+- 抽象层：`DirectMasterKeyStore` / `WrappedMasterKeyStore`（应用主密钥的两种存法）
 - **Windows**：CNG `NCrypt*` + TPM 2.0（`MS_PLATFORM_CRYPTO_PROVIDER`）
 - **Windows（无 TPM 时）**：CNG 软件密钥库降级路径
+- **Windows 主密钥**：包裹形式优先走 TPM，直接形式走软件密钥库（原因见下文）
+- **Android 主密钥**：两种形式都架在 Android Keystore 上（仅交叉编译校验，未在真机上验证）
+- **Android**：Keystore / StrongBox
 - 测试用的内存后端（`mock` feature，**默认关闭**）
 
-尚未实现：macOS（Secure Enclave）、Linux（TPM 2.0）、Android（Keystore /
-StrongBox）、iOS（Secure Enclave）。
+尚未实现：macOS（Secure Enclave）、Linux（TPM 2.0）、iOS（Secure Enclave）。
 
 > 调用 `DeviceKeyStore::backend` 可以查到某份密钥库**运行时**实际使用的后端。
 > 在没有 TPM 的 Windows 机器上它会返回 `Backend::Software`——即私钥以软件形式
@@ -56,6 +59,58 @@ StrongBox）、iOS（Secure Enclave）。
 > `open_best_available()` 返回 `Result`（真的会失败：没有 TPM、被组策略禁用、
 > 密钥库被独占），其它平台的返回 `Self`（占位后端什么都不做，不可能失败）。
 > 这是刻意的——给它一个 `Result` 只会让调用方写一个永远走不到的错误分支。
+
+## 主密钥的两种存法
+
+平台密钥库除了设备身份密钥，还持有**应用的主密钥**——保险库文件就是用它加密的。主密
+钥是 `MasterKey` 里 32 字节的不透明材料：本 crate 只把它在调用方与平台之间搬运，不从
+中派生任何东西。有两种存法，**由调用方选哪个类型决定**，不是运行期开关：
+
+| 形式 | 契约 | 平台库里放什么 | 调用方要持久化什么 |
+|---|---|---|---|
+| 直接 | `DirectMasterKeyStore` | 主密钥材料本身 | 什么都不用 |
+| 包裹 | `WrappedMasterKeyStore` | 一把**不可导出**的 KEK | 返回的包裹字节 |
+
+```rust
+use qualia_dik::{
+    DirectMasterKeyStore, MasterKey, MockDirectMasterKeyStore, MockWrappedMasterKeyStore,
+    WrappedMasterKeyStore,
+};
+
+let key = MasterKey::from_bytes([0x2A; qualia_dik::MASTER_KEY_LEN]);
+
+// 直接：库持有材料，调用方不持久化任何东西。
+let direct = MockDirectMasterKeyStore::new();
+direct.store("account-1", &key)?;
+let loaded = direct.load("account-1")?;
+
+// 包裹：库持有 KEK，调用方把返回的字节与保险库存在一起。
+let wrapped_store = MockWrappedMasterKeyStore::new();
+let blob = wrapped_store.store("account-1", &key)?;
+let loaded_again = wrapped_store.load("account-1", &blob)?;
+
+assert_eq!(loaded.as_bytes(), loaded_again.as_bytes());
+```
+
+真实平台上把两个 `Mock*` 换成 `PlatformDirectMasterKeyStore` /
+`PlatformWrappedMasterKeyStore` 即可（Windows 上的 `open_best_available()` 返回
+`Result`，Android 同样）。
+
+KEK 的加解密**不出现在任何接口里**：没有 wrap / unwrap / encrypt / decrypt，也没有
+任何方法能拿到那把钥匙——包裹是这一形式的内部设计。两种形式都通过 `backend()` 如实报
+告实际生效的后端，绝不用软件后端冒充硬件。
+
+| 平台 | 直接 | 包裹 |
+|---|---|---|
+| Windows | 软件密钥库（TPM 提供程序会导入密钥却拒绝导出，见下） | 有 TPM 时用 TPM，否则软件密钥库 |
+| Android | 已实现，报告 keystore 对该条目的说法 | 已实现，优先 StrongBox |
+| 其它 | `UnsupportedPlatform` | `UnsupportedPlatform` |
+
+> Windows 上值得先知道的一点：**直接**形式只能落在软件密钥库上，因为 Microsoft
+> Platform Crypto Provider 会接受我们的密钥、然后拒绝把材料导出（`NTE_PERM`）。一个
+> 拿不回材料的库不满足「直接」的契约，所以它如实报告 `Backend::Software`；想要 TPM
+> 保护请选**包裹**形式。`Backend::Software` 意味着私钥只是操作系统保护下的一份软件
+> 密钥，界面必须在关键操作前告知用户。
 
 ## 接入你自己的项目
 

@@ -61,15 +61,22 @@
 
 use crate::device::{DevicePublicKey, DeviceSignature};
 use crate::keystore::traits::{
-    Backend, DIGEST_LEN, DeviceKeyStore, DeviceSigner, public_key_from_sec1, signature_from_raw,
+    Backend, DIGEST_LEN, DeviceKeyStore, DeviceSigner, DirectMasterKeyStore, MASTER_KEY_LEN,
+    MasterKey, WrappedMasterKey, WrappedMasterKeyStore, public_key_from_sec1, secrets_equal,
+    signature_from_raw,
 };
 use crate::{Error, Result};
 use std::fmt;
 use windows_sys::Win32::Security::Cryptography::{
-    BCRYPT_ECCPUBLIC_BLOB, MS_KEY_STORAGE_PROVIDER, MS_PLATFORM_CRYPTO_PROVIDER,
-    NCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_KEY_HANDLE, NCRYPT_PROV_HANDLE, NCRYPT_SILENT_FLAG,
-    NCryptCreatePersistedKey, NCryptDeleteKey, NCryptExportKey, NCryptFinalizeKey,
-    NCryptFreeObject, NCryptOpenKey, NCryptOpenStorageProvider, NCryptSignHash,
+    BCRYPT_ECCPRIVATE_BLOB, BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDSA_PRIVATE_P256_MAGIC,
+    BCRYPT_OAEP_PADDING_INFO, BCRYPT_SHA256_ALGORITHM, BCryptBuffer, BCryptBufferDesc,
+    MS_KEY_STORAGE_PROVIDER, MS_PLATFORM_CRYPTO_PROVIDER, NCRYPT_ALLOW_EXPORT_FLAG,
+    NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG, NCRYPT_DO_NOT_FINALIZE_FLAG, NCRYPT_ECDSA_P256_ALGORITHM,
+    NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_KEY_HANDLE, NCRYPT_LENGTH_PROPERTY, NCRYPT_PAD_OAEP_FLAG,
+    NCRYPT_PROV_HANDLE, NCRYPT_RSA_ALGORITHM, NCRYPT_SILENT_FLAG, NCRYPTBUFFER_PKCS_KEY_NAME,
+    NCRYPTBUFFER_VERSION, NCryptCreatePersistedKey, NCryptDecrypt, NCryptDeleteKey, NCryptEncrypt,
+    NCryptExportKey, NCryptFinalizeKey, NCryptFreeObject, NCryptImportKey, NCryptOpenKey,
+    NCryptOpenStorageProvider, NCryptSetProperty, NCryptSignHash,
 };
 
 /// `NTE_BAD_FLAGS`: the flag combination is not supported.
@@ -157,7 +164,7 @@ const MAX_LABEL_LEN: usize = 128;
 ///
 /// Returns [`Error::InvalidKeyLabel`] for an empty label, a label longer than
 /// [`MAX_LABEL_LEN`], or a label containing a character outside that set.
-fn key_name(label: &str) -> Result<Vec<u16>> {
+fn key_name_with_prefix(prefix: &str, label: &str) -> Result<Vec<u16>> {
     if label.is_empty() {
         return Err(Error::InvalidKeyLabel {
             reason: "the label is empty",
@@ -176,10 +183,15 @@ fn key_name(label: &str) -> Result<Vec<u16>> {
             reason: "the label contains characters outside the allowed set (ASCII letters, digits, - _ .)",
         });
     }
-    let name = format!("{KEY_NAME_PREFIX}{label}");
+    let name = format!("{prefix}{label}");
     let mut wide: Vec<u16> = name.encode_utf16().collect();
     wide.push(0);
     Ok(wide)
+}
+
+/// Key name of a device identity.
+fn key_name(label: &str) -> Result<Vec<u16>> {
+    key_name_with_prefix(KEY_NAME_PREFIX, label)
 }
 
 /// A CNG object handle that is released exactly once.
@@ -718,6 +730,872 @@ impl DeviceSigner for WindowsSigner {
     }
 }
 
+// ── Master key ──────────────────────────────────────────────────────
+
+/// Key-name prefix under which the direct form stores the material.
+const MASTER_KEY_NAME_PREFIX: &str = "Qualia2FA-MasterKey-";
+
+/// Key-name prefix under which the wrapped form stores its key-encryption key.
+const MASTER_KEK_NAME_PREFIX: &str = "Qualia2FA-MasterKek-";
+
+/// Prefix of the key name the direct form probes a provider with.
+///
+/// A provider is only usable for the direct form if it accepts material **and hands it back
+/// again**, and that cannot be read off a provider name. Opening the store therefore
+/// imports a key, reads it back, compares, and deletes it again.
+///
+/// The name carries the process id and a sequence number, so two processes — and two
+/// threads of one process — never probe under the same name. A shared name would be a race:
+/// one probe deletes the key the other has just imported and is about to read, and the store
+/// would report a provider as unusable because somebody else was using the same name. The
+/// cost is that a process killed in the middle of a probe leaves one key behind, which
+/// carries this prefix and can be deleted by hand.
+const MASTER_PROBE_KEY_NAME: &str = "Qualia2FA-MasterProbe";
+
+/// Sequence number that makes a probe key name unique inside one process.
+static PROBE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Length of the RSA key-encryption key of the wrapped form, in bits.
+///
+/// 2048 bits with OAEP-SHA256 carries a 32-byte master key with room to spare (the maximum
+/// is 190 bytes, RFC 8017 §7.1.1) and is the size every CNG provider supports, including
+/// the TPM.
+const MASTER_KEK_BITS: u32 = 2048;
+
+/// Length of a wrapped master key, in bytes.
+///
+/// The RSA operation returns one modulus-sized block, so this is `MASTER_KEK_BITS / 8`.
+const WRAPPED_MASTER_KEY_LEN: usize = (MASTER_KEK_BITS / 8) as usize;
+
+/// Export policy of a key that holds master key material: export allowed.
+///
+/// The direct form promises to hand the material back, so the key that holds it has to be
+/// exportable. `NCRYPT_ALLOW_EXPORT_FLAG` permits the private blob, and
+/// `NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG` permits exporting it without an extra prompt.
+const MATERIAL_EXPORT_POLICY: u32 = NCRYPT_ALLOW_EXPORT_FLAG | NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG;
+
+/// Export policy of the key-encryption key: **no export at all**.
+///
+/// The wrapped form exists because the key that unwraps the master key cannot leave the
+/// platform; a KEK that could be exported would defeat it.
+const KEK_EXPORT_POLICY: u32 = 0;
+
+/// Length of a `BCRYPT_ECCPRIVATE_BLOB` for P-256, in bytes.
+///
+/// The blob is an 8-byte `BCRYPT_ECCKEY_BLOB` header (`{ dwMagic: u32, cbKey: u32 }`)
+/// followed by `X` and `Y` (32 bytes each) and the private scalar `d` (32 bytes).
+const ECC_PRIVATE_BLOB_LEN: usize = 8 + 3 * 32;
+
+/// Offset of the private scalar inside a `BCRYPT_ECCPRIVATE_BLOB` for P-256.
+const ECC_PRIVATE_SCALAR_OFFSET: usize = 8 + 2 * 32;
+
+/// Key name of a directly stored master key.
+fn master_key_name(label: &str) -> Result<Vec<u16>> {
+    key_name_with_prefix(MASTER_KEY_NAME_PREFIX, label)
+}
+
+/// Key name of a wrapped master key's key-encryption key.
+fn master_kek_name(label: &str) -> Result<Vec<u16>> {
+    key_name_with_prefix(MASTER_KEK_NAME_PREFIX, label)
+}
+
+/// A probe key name that no other probe in this process uses.
+fn probe_key_name() -> Vec<u16> {
+    let sequence = PROBE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name: Vec<u16> = format!("{MASTER_PROBE_KEY_NAME}-{}-{sequence}", std::process::id())
+        .encode_utf16()
+        .collect();
+    name.push(0);
+    name
+}
+
+/// Builds the `BCRYPT_ECCPRIVATE_BLOB` that carries `material` as a P-256 private scalar.
+///
+/// # Why a private scalar
+///
+/// CNG's key storage providers persist **keys**, and nothing else: they refuse to import a
+/// symmetric key's material (`BCRYPT_KEY_DATA_BLOB` and `NCRYPT_CIPHER_KEY_BLOB` are both
+/// rejected with `NTE_NOT_SUPPORTED`) and they refuse custom key properties. A P-256
+/// private key is the one object whose material a provider both stores and — with an export
+/// policy that allows it — returns, so the material is carried as the private scalar of a
+/// key that is never used for signing. The public point is derived from it because the blob
+/// format requires a point that matches.
+///
+/// # Errors
+///
+/// [`Error::InvalidMasterKey`] when `material` is not a valid P-256 scalar. Random 32-byte
+/// material is below the group order with probability `1 - 2^-32`, so this is a real, if
+/// extremely rare, case that has to be an error rather than a panic.
+fn material_to_private_blob(material: &[u8; MASTER_KEY_LEN]) -> Result<Vec<u8>> {
+    let signing = p256::ecdsa::SigningKey::from_slice(material).map_err(|_| {
+        Error::InvalidMasterKey {
+            reason: "the material is not a valid P-256 scalar, so the software provider cannot hold it as a key",
+        }
+    })?;
+    let point = signing.verifying_key().to_sec1_point(false);
+    let sec1 = point.as_bytes();
+    if sec1.len() != 65 {
+        return Err(Error::InvalidMasterKey {
+            reason: "the P-256 public point is not 65 bytes long",
+        });
+    }
+
+    let mut blob = Vec::with_capacity(ECC_PRIVATE_BLOB_LEN);
+    blob.extend_from_slice(&BCRYPT_ECDSA_PRIVATE_P256_MAGIC.to_le_bytes());
+    blob.extend_from_slice(&32_u32.to_le_bytes());
+    blob.extend_from_slice(&sec1[1..33]);
+    blob.extend_from_slice(&sec1[33..65]);
+    blob.extend_from_slice(material);
+    Ok(blob)
+}
+
+/// Takes the private scalar out of a `BCRYPT_ECCPRIVATE_BLOB`.
+///
+/// # Errors
+///
+/// [`Error::InvalidMasterKey`] when the blob is not a P-256 private blob: a wrong length,
+/// a magic that is not `BCRYPT_ECDSA_PRIVATE_P256_MAGIC`, or a `cbKey` that is not 32.
+fn private_blob_to_material(blob: &[u8]) -> Result<MasterKey> {
+    if blob.len() != ECC_PRIVATE_BLOB_LEN {
+        return Err(Error::InvalidMasterKey {
+            reason: "the private key blob returned by the platform is not 104 bytes long",
+        });
+    }
+    let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+    if magic != BCRYPT_ECDSA_PRIVATE_P256_MAGIC {
+        return Err(Error::InvalidMasterKey {
+            reason: "the private key blob returned by the platform is not a P-256 private blob",
+        });
+    }
+    let cb_key = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
+    if cb_key != 32 {
+        return Err(Error::InvalidMasterKey {
+            reason: "the private key blob returned by the platform is not a 32-byte coordinate (not P-256)",
+        });
+    }
+
+    let mut material = [0_u8; MASTER_KEY_LEN];
+    material.copy_from_slice(&blob[ECC_PRIVATE_SCALAR_OFFSET..]);
+    Ok(MasterKey::from_bytes(material))
+}
+
+/// Writes a 32-bit property on a key.
+///
+/// # Errors
+///
+/// [`Error::Hardware`] with the provider's status code.
+fn set_key_dword(key: &CngHandle, property: *const u16, value: u32) -> Result<()> {
+    // SAFETY: `key` holds a valid key handle, `property` is a static wide string exported by
+    // `windows-sys`, and the pointer with its length describe `value`, which outlives the
+    // call.
+    let status = unsafe {
+        NCryptSetProperty(
+            key.raw,
+            property,
+            (&raw const value).cast::<u8>(),
+            4,
+            NCRYPT_SILENT_FLAG,
+        )
+    };
+    if status < 0 {
+        return Err(Error::Hardware {
+            operation: "NCryptSetProperty",
+            code: status,
+        });
+    }
+    Ok(())
+}
+
+/// Exports a key in the format `blob_type` names.
+///
+/// Two calls, as CNG requires: the first asks for the length, the second fills a buffer of
+/// that length.
+///
+/// # Errors
+///
+/// [`Error::Hardware`] with the status code, and [`Error::InvalidMasterKey`] when the
+/// provider reports an implausible length (more than 4096 bytes).
+fn export_blob(key: &CngHandle, blob_type: *const u16, operation: &'static str) -> Result<Vec<u8>> {
+    let mut needed: u32 = 0;
+    // SAFETY: `key` is valid; a null output pointer with length 0 is the documented way to
+    // query the required length, and nothing is written to memory in that case.
+    let status = unsafe {
+        NCryptExportKey(
+            key.raw,
+            0,
+            blob_type,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            0,
+            &raw mut needed,
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(Error::Hardware {
+            operation,
+            code: status,
+        });
+    }
+    if needed > 4096 {
+        return Err(Error::InvalidMasterKey {
+            reason: "the platform reported an implausible key blob length (over 4096 bytes)",
+        });
+    }
+
+    let mut blob = vec![0_u8; needed as usize];
+    // SAFETY: `blob` has at least `needed` bytes, matching the length passed in.
+    let status = unsafe {
+        NCryptExportKey(
+            key.raw,
+            0,
+            blob_type,
+            std::ptr::null(),
+            blob.as_mut_ptr(),
+            needed,
+            &raw mut needed,
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(Error::Hardware {
+            operation,
+            code: status,
+        });
+    }
+    blob.truncate(needed as usize);
+    Ok(blob)
+}
+
+/// Imports a key blob under a name, so that the provider persists it.
+///
+/// The name travels in a parameter list (`NCRYPTBUFFER_PKCS_KEY_NAME`), which is how CNG
+/// names an imported key: `NCryptImportKey` has no name parameter, and an import without a
+/// name is treated as ephemeral.
+///
+/// # Errors
+///
+/// [`Error::Hardware`] with the status code. `NTE_EXISTS` is **not** translated here: the
+/// callers decide whether an existing entry is a race to resolve or an error.
+fn import_named_key(
+    provider: &CngHandle,
+    name: &[u16],
+    blob_type: *const u16,
+    blob: &[u8],
+    flags: u32,
+) -> Result<CngHandle> {
+    let mut name_buffer = BCryptBuffer {
+        cbBuffer: (name.len() * 2) as u32,
+        BufferType: NCRYPTBUFFER_PKCS_KEY_NAME,
+        pvBuffer: name.as_ptr().cast_mut().cast(),
+    };
+    let parameters = BCryptBufferDesc {
+        ulVersion: NCRYPTBUFFER_VERSION,
+        cBuffers: 1,
+        pBuffers: &raw mut name_buffer,
+    };
+    let mut key: NCRYPT_KEY_HANDLE = 0;
+    // SAFETY: `provider` is valid, `parameters` describes a buffer that stays alive and
+    // writable for the call, `blob` is a valid slice, and `key` is writable.
+    let status = unsafe {
+        NCryptImportKey(
+            provider.raw,
+            0,
+            blob_type,
+            &parameters,
+            &raw mut key,
+            blob.as_ptr(),
+            blob.len() as u32,
+            flags,
+        )
+    };
+    if status < 0 {
+        return Err(Error::Hardware {
+            operation: "NCryptImportKey",
+            code: status,
+        });
+    }
+    Ok(CngHandle::new(key))
+}
+
+/// Deletes a persisted key by name.
+///
+/// # Errors
+///
+/// [`Error::KeyNotFound`] when no key has that name, and [`Error::Hardware`] when the
+/// provider refuses the deletion.
+fn delete_key_by_name(provider: &CngHandle, name: &[u16]) -> Result<()> {
+    let mut handle: NCRYPT_KEY_HANDLE = 0;
+    // SAFETY: `provider` is valid, `name` is NUL-terminated and stays alive for the call,
+    // and `handle` is writable.
+    let status = unsafe {
+        NCryptOpenKey(
+            provider.raw,
+            &raw mut handle,
+            name.as_ptr(),
+            0,
+            NCRYPT_SILENT_FLAG,
+        )
+    };
+    if means_no_such_key(status) {
+        return Err(Error::KeyNotFound {
+            label: String::from_utf16_lossy(&name[..name.len().saturating_sub(1)]),
+        });
+    }
+    if status < 0 {
+        return Err(Error::Hardware {
+            operation: "NCryptOpenKey",
+            code: status,
+        });
+    }
+
+    let mut key = CngHandle::new(handle);
+    // SAFETY: `handle` is valid. `NCryptDeleteKey` releases the handle along with the key,
+    // so it must not be freed afterwards: zeroing `raw` makes `CngHandle::drop` a no-op.
+    let status = unsafe { NCryptDeleteKey(key.raw, 0) };
+    key.raw = 0;
+    if status < 0 {
+        return Err(Error::Hardware {
+            operation: "NCryptDeleteKey",
+            code: status,
+        });
+    }
+    Ok(())
+}
+
+/// Removes a key object that may never have been finalized, best effort.
+///
+/// CNG deletes a key through an open handle, and a key that was created but not finalized
+/// still occupies its name, so the finalization is retried here before the deletion. Both
+/// steps are best effort: this runs while another failure is already being reported, and a
+/// second error would replace a diagnosis with a mystery.
+fn remove_unfinished_key(provider: &CngHandle, name: &[u16]) {
+    let Ok(Some(mut key)) = open_key(provider, name) else {
+        return;
+    };
+    // SAFETY: `key` holds a valid key handle that this function owns.
+    let _ = unsafe { NCryptFinalizeKey(key.raw, NCRYPT_SILENT_FLAG) };
+    // SAFETY: the handle is still valid. `NCryptDeleteKey` releases it along with the key, so
+    // zeroing `raw` keeps `CngHandle::drop` from freeing it a second time.
+    let _ = unsafe { NCryptDeleteKey(key.raw, 0) };
+    key.raw = 0;
+}
+
+/// Stores the material as a persisted P-256 key and finalizes it.
+///
+/// # Errors
+///
+/// [`Error::Hardware`] with the status code of the failing step. A key object that was left
+/// behind by a failing step is removed again, because it occupies the name and the next
+/// attempt would find it taken.
+fn store_material_key(
+    provider: &CngHandle,
+    name: &[u16],
+    material: &[u8; MASTER_KEY_LEN],
+) -> Result<()> {
+    let blob = material_to_private_blob(material)?;
+    let result = (|| -> Result<()> {
+        let key = import_named_key(
+            provider,
+            name,
+            BCRYPT_ECCPRIVATE_BLOB,
+            &blob,
+            NCRYPT_SILENT_FLAG | NCRYPT_DO_NOT_FINALIZE_FLAG,
+        )?;
+        set_key_dword(&key, NCRYPT_EXPORT_POLICY_PROPERTY, MATERIAL_EXPORT_POLICY)?;
+        // SAFETY: `key` holds a valid, not yet finalized key handle.
+        let status = unsafe { NCryptFinalizeKey(key.raw, NCRYPT_SILENT_FLAG) };
+        if status < 0 {
+            return Err(Error::Hardware {
+                operation: "NCryptFinalizeKey",
+                code: status,
+            });
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        remove_unfinished_key(provider, name);
+    }
+    result
+}
+
+/// Reads the material back out of the persisted key.
+///
+/// # Errors
+///
+/// [`Error::KeyNotFound`] when the name holds nothing, and an export failure or a blob that
+/// is not a P-256 private blob as documented on the two helpers.
+fn load_material(provider: &CngHandle, name: &[u16]) -> Result<MasterKey> {
+    let key = open_key(provider, name)?.ok_or_else(|| Error::KeyNotFound {
+        label: String::from_utf16_lossy(&name[..name.len().saturating_sub(1)]),
+    })?;
+    let blob = export_blob(&key, BCRYPT_ECCPRIVATE_BLOB, "NCryptExportKey")?;
+    private_blob_to_material(&blob)
+}
+
+/// Whether `provider` can hold master key material **and hand it back**.
+///
+/// This is the probe the direct form decides with. It is not a formality: the Microsoft
+/// Platform Crypto Provider imports a key under our name, finalizes it and then refuses to
+/// export it (`NTE_PERM`), so a store that only checked "can I create a key here" would
+/// accept material it could never return.
+///
+/// # Errors
+///
+/// The failure of whichever step the provider refused, so that the caller can report why
+/// the provider is unusable for this form.
+fn provider_can_hold_material(provider: &CngHandle) -> Result<()> {
+    let name = probe_key_name();
+
+    let probe = [0x5A_u8; MASTER_KEY_LEN];
+    let result = (|| -> Result<()> {
+        store_material_key(provider, &name, &probe)?;
+        let read_back = load_material(provider, &name)?;
+        if !secrets_equal(read_back.as_bytes(), &probe) {
+            return Err(Error::InvalidMasterKey {
+                reason: "the provider returned material that differs from what was stored in it",
+            });
+        }
+        Ok(())
+    })();
+
+    let _ = delete_key_by_name(provider, &name);
+    result
+}
+
+/// Opens a key-encryption key that already exists, or creates and finalizes one.
+///
+/// # Errors
+///
+/// [`Error::Hardware`] with the status code of the failing step.
+fn open_or_create_kek(provider: &CngHandle, name: &[u16]) -> Result<CngHandle> {
+    if let Some(key) = open_key(provider, name)? {
+        return Ok(key);
+    }
+
+    let mut handle: NCRYPT_KEY_HANDLE = 0;
+    // SAFETY: `provider` is valid, `name` is NUL-terminated and stays alive for the call,
+    // and `handle` is writable.
+    let status = unsafe {
+        NCryptCreatePersistedKey(
+            provider.raw,
+            &raw mut handle,
+            NCRYPT_RSA_ALGORITHM,
+            name.as_ptr(),
+            0,
+            0,
+        )
+    };
+    if status == NTE_EXISTS {
+        return open_key(provider, name)?.ok_or(Error::KeyNotFound {
+            label: String::from_utf16_lossy(&name[..name.len().saturating_sub(1)]),
+        });
+    }
+    if status < 0 {
+        return Err(Error::Hardware {
+            operation: "NCryptCreatePersistedKey",
+            code: status,
+        });
+    }
+    let key = CngHandle::new(handle);
+
+    let result = (|| -> Result<()> {
+        set_key_dword(&key, NCRYPT_LENGTH_PROPERTY, MASTER_KEK_BITS)?;
+        set_key_dword(&key, NCRYPT_EXPORT_POLICY_PROPERTY, KEK_EXPORT_POLICY)?;
+        // SAFETY: `key` holds a valid, not yet finalized key handle.
+        let status = unsafe { NCryptFinalizeKey(key.raw, NCRYPT_SILENT_FLAG) };
+        if status < 0 {
+            return Err(Error::Hardware {
+                operation: "NCryptFinalizeKey",
+                code: status,
+            });
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        remove_unfinished_key(provider, name);
+        return Err(error);
+    }
+    Ok(key)
+}
+
+/// The OAEP parameters used for wrapping: SHA-256, no label.
+fn oaep_padding() -> BCRYPT_OAEP_PADDING_INFO {
+    BCRYPT_OAEP_PADDING_INFO {
+        pszAlgId: BCRYPT_SHA256_ALGORITHM,
+        pbLabel: std::ptr::null_mut(),
+        cbLabel: 0,
+    }
+}
+
+/// Wraps the material with a key-encryption key (RSA-OAEP-SHA256, RFC 8017 §7.1.1).
+///
+/// # Errors
+///
+/// [`Error::Hardware`] with the status code when the provider refuses the operation.
+fn wrap_with_kek(kek: &CngHandle, material: &[u8; MASTER_KEY_LEN]) -> Result<WrappedMasterKey> {
+    let padding = oaep_padding();
+    let mut needed: u32 = 0;
+    // SAFETY: `kek` is valid, `material` and `padding` stay alive for the call, and a null
+    // output pointer with length 0 is the documented way to query the required length.
+    let status = unsafe {
+        NCryptEncrypt(
+            kek.raw,
+            material.as_ptr(),
+            material.len() as u32,
+            (&raw const padding).cast(),
+            std::ptr::null_mut(),
+            0,
+            &raw mut needed,
+            NCRYPT_PAD_OAEP_FLAG,
+        )
+    };
+    if status < 0 {
+        return Err(Error::Hardware {
+            operation: "NCryptEncrypt(query length)",
+            code: status,
+        });
+    }
+    if needed as usize != WRAPPED_MASTER_KEY_LEN {
+        return Err(Error::Hardware {
+            operation: "NCryptEncrypt reported an unexpected ciphertext length",
+            code: needed as i32,
+        });
+    }
+
+    let mut wrapped = vec![0_u8; WRAPPED_MASTER_KEY_LEN];
+    // SAFETY: `wrapped` has exactly `needed` bytes, matching the length passed in.
+    let status = unsafe {
+        NCryptEncrypt(
+            kek.raw,
+            material.as_ptr(),
+            material.len() as u32,
+            (&raw const padding).cast(),
+            wrapped.as_mut_ptr(),
+            needed,
+            &raw mut needed,
+            NCRYPT_PAD_OAEP_FLAG,
+        )
+    };
+    if status < 0 {
+        return Err(Error::Hardware {
+            operation: "NCryptEncrypt",
+            code: status,
+        });
+    }
+    wrapped.truncate(needed as usize);
+    Ok(WrappedMasterKey::from_bytes(wrapped))
+}
+
+/// Unwraps the material with a key-encryption key.
+///
+/// # Errors
+///
+/// [`Error::InvalidWrappedKey`] carrying the provider's code when the provider rejects the
+/// bytes: OAEP's own check fails for a damaged blob, for a blob from another KEK and for a
+/// blob from another device, and the provider reports that as an error rather than as
+/// bytes. [`Error::KeyNotFound`] is reported by the caller, not here.
+fn unwrap_with_kek(kek: &CngHandle, wrapped: &[u8]) -> Result<MasterKey> {
+    let padding = oaep_padding();
+    let mut plain = vec![0_u8; MASTER_KEY_LEN];
+    let mut needed: u32 = MASTER_KEY_LEN as u32;
+    // SAFETY: `kek` is valid, `wrapped` and `padding` stay alive for the call, and `plain`
+    // is a writable buffer of exactly the length passed in.
+    let status = unsafe {
+        NCryptDecrypt(
+            kek.raw,
+            wrapped.as_ptr(),
+            wrapped.len() as u32,
+            (&raw const padding).cast(),
+            plain.as_mut_ptr(),
+            needed,
+            &raw mut needed,
+            NCRYPT_PAD_OAEP_FLAG,
+        )
+    };
+    if status < 0 {
+        return Err(Error::InvalidWrappedKey {
+            reason: "the key-encryption key rejected the bytes (damaged, or wrapped by a different key)",
+            code: status,
+        });
+    }
+    if needed as usize != MASTER_KEY_LEN {
+        return Err(Error::InvalidWrappedKey {
+            reason: "the wrapped bytes do not decrypt to a 32-byte master key",
+            code: 0,
+        });
+    }
+
+    let mut material = [0_u8; MASTER_KEY_LEN];
+    material.copy_from_slice(&plain);
+    Ok(MasterKey::from_bytes(material))
+}
+
+/// Master key store of the **direct** form on Windows.
+///
+/// # What it holds
+///
+/// The material itself, as the private scalar of a P-256 key in the storage provider that
+/// answered. The provider protects the key with whatever it uses for its own keys, and the
+/// key is marked exportable, because this form's contract is to hand the material back.
+///
+/// # Why the material travels as a private key
+///
+/// A CNG key storage provider persists **keys** and nothing else: importing a symmetric key's
+/// material is refused with `NTE_NOT_SUPPORTED`, and so is a custom key property. A P-256
+/// private key is the one object whose material a provider both stores and — with an export
+/// policy that allows it — returns, so the master key is carried as the private scalar of a
+/// key that is never used for signing. 32 bytes of random material is below the group order
+/// with probability `1 - 2^-32`; that remainder is an error
+/// ([`Error::InvalidMasterKey`]), never a panic.
+///
+/// # Which provider
+///
+/// The Microsoft Platform Crypto Provider is tried first, and the Microsoft Software Key
+/// Storage Provider is the fallback; [`DirectMasterKeyStore::backend`] reports which one the
+/// store ended up with. On a machine with a TPM the answer is still
+/// [`Backend::Software`]: the TPM provider imports the key and then refuses to export it
+/// (`NTE_PERM`), and a store that cannot return the material is not a store for this form.
+/// A caller who wants the material protected by the TPM wants the wrapped form.
+pub struct WindowsDirectMasterKeyStore {
+    /// Handle of the opened provider.
+    provider: CngHandle,
+    /// The provider that answered, as probed when the store was opened.
+    backend: Backend,
+}
+
+/// Prints the backend only.
+impl fmt::Debug for WindowsDirectMasterKeyStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WindowsDirectMasterKeyStore")
+            .field("backend", &self.backend)
+            .finish_non_exhaustive()
+    }
+}
+
+impl WindowsDirectMasterKeyStore {
+    /// Opens `preferred` and checks that it can hold master key material.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::HardwareUnavailable`] when the provider cannot be opened, and the same error
+    /// carrying the probe's own failure when it opens but cannot hold the material and hand
+    /// it back.
+    pub fn open(preferred: WindowsProvider) -> Result<Self> {
+        let provider = open_provider(preferred.provider_name()).map_err(|error| {
+            Error::HardwareUnavailable {
+                reason: format!("cannot open {} ({error})", preferred.describe()),
+            }
+        })?;
+        provider_can_hold_material(&provider).map_err(|error| Error::HardwareUnavailable {
+            reason: format!(
+                "{} cannot hold master key material: {error}",
+                preferred.describe()
+            ),
+        })?;
+        Ok(Self {
+            provider,
+            backend: preferred.backend(),
+        })
+    }
+
+    /// Prefers the TPM and falls back to the software key store.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::HardwareUnavailable`] when neither provider can hold the material; in that
+    /// case the system itself is in a bad state.
+    pub fn open_best_available() -> Result<Self> {
+        match Self::open(WindowsProvider::Tpm) {
+            Ok(store) => Ok(store),
+            Err(tpm_error) => Self::open(WindowsProvider::Software).map_err(|software_error| {
+                Error::HardwareUnavailable {
+                    reason: format!(
+                        "neither the TPM nor the software key store can hold master key material (TPM: {tpm_error}; software: {software_error})"
+                    ),
+                }
+            }),
+        }
+    }
+}
+
+impl DirectMasterKeyStore for WindowsDirectMasterKeyStore {
+    fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    /// Stores the material, replacing what was under `label`.
+    ///
+    /// The material is read back and compared before this returns: a store that accepted
+    /// material it cannot return would look like a working store until the first attempt to
+    /// open a vault.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidKeyLabel`] for an unusable label, [`Error::InvalidMasterKey`] when
+    /// the provider returned something else than what was stored, and [`Error::Hardware`]
+    /// when the provider refuses.
+    fn store(&self, label: &str, key: &MasterKey) -> Result<()> {
+        let name = master_key_name(label)?;
+
+        match delete_key_by_name(&self.provider, &name) {
+            Ok(()) | Err(Error::KeyNotFound { .. }) => {}
+            Err(other) => return Err(other),
+        }
+
+        store_material_key(&self.provider, &name, key.as_bytes())?;
+        let read_back = load_material(&self.provider, &name)?;
+        if !secrets_equal(read_back.as_bytes(), key.as_bytes()) {
+            let _ = delete_key_by_name(&self.provider, &name);
+            return Err(Error::InvalidMasterKey {
+                reason: "the provider returned material that differs from what was stored in it",
+            });
+        }
+        Ok(())
+    }
+
+    /// Reads the material back.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyNotFound`] when the label holds nothing, plus the label and provider
+    /// failures documented on the helpers.
+    fn load(&self, label: &str) -> Result<MasterKey> {
+        let name = master_key_name(label)?;
+        load_material(&self.provider, &name)
+    }
+
+    /// Deletes the entry.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyNotFound`] when the label holds nothing.
+    fn delete(&self, label: &str) -> Result<()> {
+        let name = master_key_name(label)?;
+        delete_key_by_name(&self.provider, &name)
+    }
+}
+
+/// Master key store of the **wrapped** form on Windows.
+///
+/// # What it holds
+///
+/// A 2048-bit RSA key per label, created in the storage provider, marked **non-exportable**
+/// (`NCRYPT_EXPORT_POLICY_PROPERTY` = 0) and never handed out. Wrapping and unwrapping run
+/// inside that key: `NCryptEncrypt` / `NCryptDecrypt` with OAEP-SHA256. On the Microsoft
+/// Platform Crypto Provider the unwrap is a TPM private key operation, so the material comes
+/// back only on the machine that sealed it.
+///
+/// # Which provider
+///
+/// The TPM provider is preferred and the software key store is the fallback, with
+/// [`WrappedMasterKeyStore::backend`] reporting which one answered. Both support RSA-2048
+/// with OAEP, so on a machine with a usable TPM this form really is hardware backed — unlike
+/// the direct form, which the TPM provider cannot serve at all.
+pub struct WindowsWrappedMasterKeyStore {
+    /// Handle of the opened provider.
+    provider: CngHandle,
+    /// The backend this store is actually bound to.
+    backend: Backend,
+}
+
+/// Prints the backend only.
+impl fmt::Debug for WindowsWrappedMasterKeyStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WindowsWrappedMasterKeyStore")
+            .field("backend", &self.backend)
+            .finish_non_exhaustive()
+    }
+}
+
+impl WindowsWrappedMasterKeyStore {
+    /// Opens the provider selected by `preferred`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::HardwareUnavailable`] when the provider is not available on this machine.
+    pub fn open(preferred: WindowsProvider) -> Result<Self> {
+        let provider = open_provider(preferred.provider_name()).map_err(|error| {
+            Error::HardwareUnavailable {
+                reason: format!("cannot open {} ({error})", preferred.describe()),
+            }
+        })?;
+        Ok(Self {
+            provider,
+            backend: preferred.backend(),
+        })
+    }
+
+    /// Prefers the TPM and falls back to the software key store.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::HardwareUnavailable`] when neither provider can be opened.
+    pub fn open_best_available() -> Result<Self> {
+        match Self::open(WindowsProvider::Tpm) {
+            Ok(store) => Ok(store),
+            Err(tpm_error) => Self::open(WindowsProvider::Software).map_err(|software_error| {
+                Error::HardwareUnavailable {
+                    reason: format!(
+                        "neither the TPM nor the software key store is available (TPM: {tpm_error}; software: {software_error})"
+                    ),
+                }
+            }),
+        }
+    }
+}
+
+impl WrappedMasterKeyStore for WindowsWrappedMasterKeyStore {
+    fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    /// Wraps the material with this label's key-encryption key, creating the KEK on first
+    /// use.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidKeyLabel`] for an unusable label, and [`Error::Hardware`] when the
+    /// provider refuses to create or use the KEK.
+    fn store(&self, label: &str, key: &MasterKey) -> Result<WrappedMasterKey> {
+        let name = master_kek_name(label)?;
+        let kek = open_or_create_kek(&self.provider, &name)?;
+        wrap_with_kek(&kek, key.as_bytes())
+    }
+
+    /// Unwraps the bytes with this label's key-encryption key.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyNotFound`] when the label has no KEK, and [`Error::InvalidWrappedKey`]
+    /// when the bytes are not a wrapped master key or do not unwrap on this machine.
+    fn load(&self, label: &str, wrapped: &WrappedMasterKey) -> Result<MasterKey> {
+        let name = master_kek_name(label)?;
+        if wrapped.as_bytes().len() != WRAPPED_MASTER_KEY_LEN {
+            return Err(Error::InvalidWrappedKey {
+                reason: "the wrapped master key is not the 256 bytes a 2048-bit key-encryption key produces",
+                code: 0,
+            });
+        }
+        let kek = open_key(&self.provider, &name)?.ok_or_else(|| Error::KeyNotFound {
+            label: label.to_string(),
+        })?;
+        unwrap_with_kek(&kek, wrapped.as_bytes())
+    }
+
+    /// Deletes this label's key-encryption key, which makes every blob it wrapped unusable.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyNotFound`] when the label has no KEK.
+    fn delete(&self, label: &str) -> Result<()> {
+        let name = master_kek_name(label)?;
+        delete_key_by_name(&self.provider, &name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,5 +1705,151 @@ mod tests {
         assert_eq!(WindowsProvider::Software.backend(), Backend::Software);
         assert!(WindowsProvider::Tpm.backend().is_hardware_backed());
         assert!(!WindowsProvider::Software.backend().is_hardware_backed());
+    }
+
+    /// The three key prefixes have to stay distinct: an identity, a directly stored master
+    /// key and a key-encryption key may share one label, and one must never overwrite
+    /// another.
+    #[test]
+    fn key_prefixes_are_distinct() {
+        let identity = key_name("shared").expect("valid label");
+        let material = master_key_name("shared").expect("valid label");
+        let kek = master_kek_name("shared").expect("valid label");
+        assert_ne!(identity, material);
+        assert_ne!(identity, kek);
+        assert_ne!(material, kek);
+
+        let text =
+            |wide: &[u16]| String::from_utf16(&wide[..wide.len() - 1]).expect("valid UTF-16");
+        assert_eq!(text(&material), "Qualia2FA-MasterKey-shared");
+        assert_eq!(text(&kek), "Qualia2FA-MasterKek-shared");
+    }
+
+    /// Master key labels follow the same rules as device identity labels.
+    #[test]
+    fn master_key_labels_are_validated() {
+        for bad in ["", "a/b", "a\0b", "has space", "设备"] {
+            assert!(master_key_name(bad).is_err(), "{bad:?} must be rejected");
+            assert!(master_kek_name(bad).is_err(), "{bad:?} must be rejected");
+        }
+        assert!(master_key_name("account-1").is_ok());
+        assert!(master_kek_name("account-1").is_ok());
+    }
+
+    /// Material survives the trip through the private key blob it is carried in.
+    ///
+    /// This is the encoding the direct form rests on: if the scalar did not come back, the
+    /// store would return material that differs from what it was given, which is the one
+    /// thing the form must never do.
+    #[test]
+    fn material_survives_the_private_blob() {
+        let material = [
+            0x5A_u8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+            0x0D, 0x0E, 0x0F, 0x10,
+        ];
+        let blob = material_to_private_blob(&material).expect("the material is a valid scalar");
+        assert_eq!(blob.len(), ECC_PRIVATE_BLOB_LEN);
+        let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+        assert_eq!(magic, BCRYPT_ECDSA_PRIVATE_P256_MAGIC);
+        assert_eq!(&blob[ECC_PRIVATE_SCALAR_OFFSET..], &material[..]);
+
+        let back = private_blob_to_material(&blob).expect("the blob is a P-256 private blob");
+        assert!(secrets_equal(back.as_bytes(), &material));
+    }
+
+    /// Material that is not a valid P-256 scalar is an error, never a panic.
+    #[test]
+    fn invalid_scalar_is_rejected() {
+        let error = material_to_private_blob(&[0xFF_u8; MASTER_KEY_LEN])
+            .expect_err("all-ones is above the group order");
+        assert!(matches!(error, Error::InvalidMasterKey { .. }));
+        assert!(
+            material_to_private_blob(&[0x00_u8; MASTER_KEY_LEN]).is_err(),
+            "zero is not a valid scalar either"
+        );
+    }
+
+    /// A blob that is not a P-256 private blob is rejected rather than interpreted.
+    #[test]
+    fn foreign_private_blobs_are_rejected() {
+        let material = [0x11_u8; MASTER_KEY_LEN];
+        let good = material_to_private_blob(&material).expect("valid scalar");
+
+        let mut short = good.clone();
+        short.truncate(ECC_PRIVATE_BLOB_LEN - 1);
+        let mut wrong_magic = good.clone();
+        wrong_magic[0] ^= 0x01;
+        let mut wrong_key_size = good.clone();
+        wrong_key_size[4] = 64;
+
+        for blob in [short, wrong_magic, wrong_key_size, Vec::new()] {
+            let error = private_blob_to_material(&blob).expect_err("must be rejected");
+            assert!(matches!(error, Error::InvalidMasterKey { .. }));
+        }
+    }
+
+    /// The wrapped length is the modulus size of the key-encryption key.
+    #[test]
+    fn wrapped_length_matches_the_kek_size() {
+        assert_eq!(WRAPPED_MASTER_KEY_LEN, 256);
+        assert_eq!(MASTER_KEK_BITS, 2048);
+    }
+
+    /// The export policies are the ones the two forms need: the material can be read back,
+    /// the key-encryption key cannot be exported at all.
+    #[test]
+    fn export_policies_match_the_forms() {
+        assert_ne!(MATERIAL_EXPORT_POLICY & NCRYPT_ALLOW_EXPORT_FLAG, 0);
+        assert_ne!(
+            MATERIAL_EXPORT_POLICY & NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG,
+            0
+        );
+        assert_eq!(KEK_EXPORT_POLICY, 0);
+    }
+
+    /// A provider that refuses the material must not be left holding a half-created key.
+    ///
+    /// This drives the store's own helpers against the real providers under a fixed name,
+    /// because the failure that matters is invisible in the public API: the TPM provider
+    /// accepts the import and then refuses the export policy, and a key object left behind by
+    /// that path occupies the name and accumulates with every attempt.
+    ///
+    /// Both outcomes are checked. A provider that answered must have the key (and hand the
+    /// material back), a provider that refused must have nothing left under the name.
+    /// Requires a TPM for the first half; the software provider half runs everywhere.
+    #[test]
+    fn a_provider_that_refuses_the_material_keeps_no_key() {
+        let mut name: Vec<u16> = "Qualia2FA-MasterProbe-UnitTest".encode_utf16().collect();
+        name.push(0);
+        let material = [0x3C_u8; MASTER_KEY_LEN];
+
+        for preferred in [WindowsProvider::Tpm, WindowsProvider::Software] {
+            let Ok(provider) = open_provider(preferred.provider_name()) else {
+                println!("skipping {preferred:?}: the provider is not available");
+                continue;
+            };
+            remove_unfinished_key(&provider, &name);
+
+            match store_material_key(&provider, &name, &material) {
+                Ok(()) => {
+                    let read_back = load_material(&provider, &name).expect("read back");
+                    assert!(
+                        secrets_equal(read_back.as_bytes(), &material),
+                        "{preferred:?} returned material that differs from what was stored"
+                    );
+                    delete_key_by_name(&provider, &name).expect("clean up");
+                }
+                Err(error) => {
+                    println!("{preferred:?} refused the material: {error}");
+                    assert!(
+                        open_key(&provider, &name)
+                            .expect("the probe must not fail to look")
+                            .is_none(),
+                        "{preferred:?} left a key behind under the probe name"
+                    );
+                }
+            }
+        }
     }
 }

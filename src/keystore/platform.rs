@@ -54,6 +54,11 @@
 //!    the crate documentation.
 //! 4. **Never** fall back to a software key because hardware is unavailable: return
 //!    `UnsupportedPlatform` or `HardwareUnavailable` so that the caller can ask the user.
+//! 5. Implement **both** master key forms as well — [`crate::DirectMasterKeyStore`] and
+//!    [`crate::WrappedMasterKeyStore`] — and point the two matching
+//!    `PlatformDirectMasterKeyStore` / `PlatformWrappedMasterKeyStore` lines here at them.
+//!    A platform that can do only one of the two returns
+//!    [`crate::Error::UnsupportedPlatform`] from the other, rather than pretending.
 //!
 //! Requirements common to every backend:
 //!
@@ -61,6 +66,8 @@
 //!   space.
 //! - The signing interface takes a **digest** and returns the raw **`r||s`** (64 bytes),
 //!   matching the convention of [`crate::keystore::traits::DIGEST_LEN`].
+//! - A key-encryption key of the wrapped form **must not** be exportable, and no operation
+//!   that would reveal it may appear in an interface.
 //! - Failures are returned as [`crate::KeyStoreError`]; **no panics**.
 //! - Every `unsafe` block carries a `// SAFETY:` justification.
 
@@ -99,6 +106,39 @@ pub use android::AndroidKeyStore as PlatformKeyStore;
 #[cfg(not(any(target_os = "windows", target_os = "android")))]
 pub use platform_stub::StubKeyStore as PlatformKeyStore;
 
+/// The **direct** master key store of the current platform.
+///
+/// One of the two ways of holding the application's master key: the platform store keeps the
+/// material itself. See [`crate::keystore::DirectMasterKeyStore`] for the contract.
+#[cfg(target_os = "windows")]
+pub use windows::WindowsDirectMasterKeyStore as PlatformDirectMasterKeyStore;
+
+/// The direct master key store of the current platform.
+#[cfg(target_os = "android")]
+pub use android::AndroidDirectMasterKeyStore as PlatformDirectMasterKeyStore;
+
+/// The direct master key store of the current platform (this platform's backend is not
+/// implemented yet).
+#[cfg(not(any(target_os = "windows", target_os = "android")))]
+pub use platform_stub::StubDirectMasterKeyStore as PlatformDirectMasterKeyStore;
+
+/// The **wrapped** master key store of the current platform.
+///
+/// The other way of holding the application's master key: a non-exportable
+/// key-encryption key in the platform store wraps it, and only the wrapped bytes are
+/// persisted. See [`crate::keystore::WrappedMasterKeyStore`] for the contract.
+#[cfg(target_os = "windows")]
+pub use windows::WindowsWrappedMasterKeyStore as PlatformWrappedMasterKeyStore;
+
+/// The wrapped master key store of the current platform.
+#[cfg(target_os = "android")]
+pub use android::AndroidWrappedMasterKeyStore as PlatformWrappedMasterKeyStore;
+
+/// The wrapped master key store of the current platform (this platform's backend is not
+/// implemented yet).
+#[cfg(not(any(target_os = "windows", target_os = "android")))]
+pub use platform_stub::StubWrappedMasterKeyStore as PlatformWrappedMasterKeyStore;
+
 /// The storage provider of the current platform.
 #[cfg(target_os = "windows")]
 pub use windows::WindowsProvider as PlatformProvider;
@@ -118,6 +158,15 @@ pub use platform_stub::StubProvider as PlatformProvider;
 /// portable, whereas this alias only exists on Windows.
 #[cfg(target_os = "windows")]
 pub use windows::{WindowsKeyStore, WindowsProvider};
+
+/// Master key stores of the Windows backend.
+///
+/// Both forms live here: the direct one keeps the material in the provider, the wrapped one
+/// keeps a non-exportable key-encryption key there. New code should prefer
+/// [`crate::keystore::platform::PlatformDirectMasterKeyStore`] and
+/// [`crate::keystore::platform::PlatformWrappedMasterKeyStore`].
+#[cfg(target_os = "windows")]
+pub use windows::{WindowsDirectMasterKeyStore, WindowsWrappedMasterKeyStore};
 
 /// What this platform is called, and which backend it plans to use.
 ///

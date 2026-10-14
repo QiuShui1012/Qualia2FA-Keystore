@@ -21,7 +21,7 @@
 //! | Module | Responsibility | Holds private keys |
 //! |------|--------|----------|
 //! | [`device`] | Public-key representation, fingerprint ([`DeviceId`]), signature verification | No |
-//! | [`keystore`] | Key generation, public-key retrieval, message signing | Yes (in platform hardware) |
+//! | [`keystore`] | Key generation, public-key retrieval, message signing, master key storage | Yes (in platform hardware) |
 //!
 //! Both halves share the single error type [`Error`]: the caller sees the failure of one
 //! device-identity operation, not the failure of two subsystems.
@@ -42,6 +42,30 @@
 //! Downstream crates depend on this one, never the reverse: protocol logic, cryptographic
 //! primitives, and anything else that can be written in pure Rust and is unrelated to device
 //! identity belongs downstream.
+//!
+//! # Both halves of the platform key store
+//!
+//! The platform key store holds two things, and this crate exposes one contract for each:
+//!
+//! | What | Contract | Where the key material lives |
+//! |---|---|---|
+//! | The **device identity** | [`DeviceKeyStore`] / [`DeviceSigner`] | in the platform, and never leaves it |
+//! | The **application's master key** | [`DirectMasterKeyStore`] / [`WrappedMasterKeyStore`] | see below |
+//!
+//! The master key is [`MASTER_KEY_LEN`] bytes of opaque material in [`MasterKey`], and there
+//! are **two ways to hold it**, chosen by the caller through the type it reaches for:
+//!
+//! - **Direct** ([`DirectMasterKeyStore`]): the platform store keeps the material itself and
+//!   hands it back on request. The caller persists nothing.
+//! - **Wrapped** ([`WrappedMasterKeyStore`]): the platform store creates a **non-exportable**
+//!   key-encryption key and wraps the material with it; only the wrapped bytes
+//!   ([`WrappedMasterKey`]) are persisted, and the caller keeps them next to the data they
+//!   open. The key-encryption key and its operations are **not** part of the interface.
+//!
+//! Either way the store reports what actually answered through `backend()`, with the same
+//! rule as everywhere else in this crate: software is reported as
+//! [`keystore::Backend::Software`], never dressed up as hardware. A platform that implements
+//! neither form returns [`Error::UnsupportedPlatform`].
 //!
 //! # Signature algorithm: ECDSA P-256
 //!
@@ -66,7 +90,7 @@
 //! | Windows (no TPM) | CNG software KSP (`MS_KEY_STORAGE_PROVIDER`) | Implemented (fallback) |
 //! | macOS | Secure Enclave | Not implemented (placeholder backend) |
 //! | Linux | TPM 2.0 | Not implemented (placeholder backend) |
-//! | Android | Keystore / StrongBox | Not implemented (placeholder backend) |
+//! | Android | Keystore / StrongBox | Implemented |
 //! | iOS | Secure Enclave | Not implemented (placeholder backend) |
 //!
 //! Unimplemented platforms **never degrade silently**: calling
@@ -78,6 +102,15 @@
 //! yet, while [`keystore::Backend::Software`] means a backend exists but this machine has no
 //! hardware. Merging them would make "switch platform" and "switch machine"
 //! indistinguishable to callers.
+//!
+//! The two master key forms follow the same rule, with one platform specific detail worth
+//! knowing before choosing between them:
+//!
+//! | Platform | Direct | Wrapped |
+//! |---|---|---|
+//! | Windows | software provider (the TPM provider will not hand material back) | TPM where there is one, software otherwise |
+//! | Android | implemented, reports what the keystore says about the entry | implemented, StrongBox preferred |
+//! | Others | [`Error::UnsupportedPlatform`] | [`Error::UnsupportedPlatform`] |
 //!
 //! # I/O, clock, and environment
 //!
@@ -104,6 +137,33 @@
 //! let signature = signer.sign(message)?;
 //!
 //! device::verify(signer.public_key(), message, &signature)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Holding the master key, in either form:
+//!
+//! ```
+//! # #[cfg(feature = "mock")]
+//! # fn demo() -> Result<(), qualia_dik::Error> {
+//! use qualia_dik::{
+//!     DirectMasterKeyStore, MasterKey, MockDirectMasterKeyStore, MockWrappedMasterKeyStore,
+//!     WrappedMasterKeyStore,
+//! };
+//!
+//! let key = MasterKey::from_bytes([0x2A; qualia_dik::MASTER_KEY_LEN]);
+//!
+//! // Direct: the store keeps the material, the caller persists nothing.
+//! let direct = MockDirectMasterKeyStore::new();
+//! direct.store("account-1", &key)?;
+//! let loaded = direct.load("account-1")?;
+//!
+//! // Wrapped: the store keeps a key-encryption key, the caller persists these bytes.
+//! let wrapped_store = MockWrappedMasterKeyStore::new();
+//! let wrapped = wrapped_store.store("account-1", &key)?;
+//! let loaded_again = wrapped_store.load("account-1", &wrapped)?;
+//!
+//! assert_eq!(loaded.as_bytes(), loaded_again.as_bytes());
 //! # Ok(())
 //! # }
 //! ```
@@ -137,10 +197,13 @@ pub mod keystore;
 pub use device::{DEVICE_ID_LEN, DeviceId, DevicePublicKey, DeviceSignature};
 pub use error::{Error, Result};
 
-pub use keystore::{Backend, DeviceKeyStore, DeviceSigner, KeyStoreError};
+pub use keystore::{
+    Backend, DeviceKeyStore, DeviceSigner, DirectMasterKeyStore, KeyStoreError, MASTER_KEY_LEN,
+    MasterKey, WrappedMasterKey, WrappedMasterKeyStore,
+};
 
 #[cfg(any(test, feature = "mock"))]
-pub use keystore::MockKeyStore;
+pub use keystore::{MockDirectMasterKeyStore, MockKeyStore, MockWrappedMasterKeyStore};
 
 /// Whether this platform has an implemented hardware key store backend.
 ///

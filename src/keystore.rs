@@ -34,6 +34,37 @@
 //! hash itself: the caller passes the raw message. Verification
 //! ([`crate::device::verify`]) follows the same convention, so both sides always
 //! hash the same bytes.
+//!
+//! # The application's master key: two contracts, two forms
+//!
+//! Besides the device identity key, the platform key store holds the
+//! application's **master key** — the key a vault file is encrypted with. It is
+//! opaque material of [`MASTER_KEY_LEN`] bytes, and this crate only moves it
+//! between the caller and the platform; it never derives anything from it.
+//!
+//! There are two ways to hold it, and **the caller picks by reaching for one of
+//! two types**, not by passing a flag:
+//!
+//! | Form | Trait | What the platform store holds | What the caller persists |
+//! |---|---|---|---|
+//! | Direct | [`DirectMasterKeyStore`] | the material itself | nothing |
+//! | Wrapped | [`WrappedMasterKeyStore`] | a non-exportable key-encryption key | the wrapped bytes |
+//!
+//! The wrapped form's key-encryption key is **not part of the interface**: there is
+//! no method that wraps, unwraps, encrypts or returns it. That is the point of the
+//! form — the material is never persisted, and the key that would decrypt the
+//! persisted bytes cannot leave the platform.
+//!
+//! Both contracts report what actually happened through
+//! [`DirectMasterKeyStore::backend`] / [`WrappedMasterKeyStore::backend`], with the
+//! same rule as the device identity side: a software-backed answer is reported as
+//! [`Backend::Software`], never dressed up as hardware.
+//!
+//! # A standalone crate, but not a raw-crypto one
+//!
+//! The wrapping of the wrapped form happens **inside the platform**; this crate
+//! chooses no algorithm, derives no key from the master key and exposes no
+//! primitive. A caller that needs a cipher wants a different crate.
 
 use crate::{Error, Result};
 
@@ -52,7 +83,10 @@ mod traits;
 #[cfg(any(test, feature = "mock"))]
 mod mock;
 
-pub use traits::{Backend, DIGEST_LEN, DeviceKeyStore, DeviceSigner, sha256};
+pub use traits::{
+    Backend, DIGEST_LEN, DeviceKeyStore, DeviceSigner, DirectMasterKeyStore, MASTER_KEY_LEN,
+    MasterKey, WrappedMasterKey, WrappedMasterKeyStore, sha256,
+};
 
 /// The key store implementation of the current platform, selected at compile time.
 ///
@@ -79,7 +113,7 @@ pub use traits::{Backend, DIGEST_LEN, DeviceKeyStore, DeviceSigner, sha256};
 pub use platform::PlatformKeyStore;
 
 #[cfg(any(test, feature = "mock"))]
-pub use mock::MockKeyStore;
+pub use mock::{MockDirectMasterKeyStore, MockKeyStore, MockWrappedMasterKeyStore};
 
 /// Error type of the key store.
 ///
