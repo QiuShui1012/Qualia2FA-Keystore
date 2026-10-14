@@ -130,6 +130,12 @@ fn direct_form_round_trips_through_the_software_provider() {
 /// Provider imports the key and then refuses to export it (`NTE_PERM`), so it cannot serve a
 /// form whose contract is "hand the material back". A machine whose TPM provider does serve
 /// it is fine too — the test then checks the round-trip there.
+///
+/// Where the provider cannot even be opened there is no TPM to exercise — a virtual machine,
+/// a CI runner, a TPM disabled by group policy, a key store another process holds — and the
+/// refusal then comes from that step instead of from the export. The test skips the reason
+/// check with a printed message, the way the other TPM tests skip, and still requires the
+/// refusal to be `Error::HardwareUnavailable` rather than a silent fall back to software.
 #[test]
 fn direct_form_prefers_the_tpm_and_reports_what_answered() {
     let store = WindowsDirectMasterKeyStore::open_best_available().expect("open best available");
@@ -160,12 +166,16 @@ fn direct_form_prefers_the_tpm_and_reports_what_answered() {
                 matches!(error, Error::HardwareUnavailable { .. }),
                 "a provider that cannot hold the material must be reported as unavailable, got {error:?}"
             );
-            assert!(
-                error
-                    .to_string()
-                    .contains("cannot hold master key material"),
-                "the reason must say why the provider is unusable: {error}"
-            );
+            let reason = error.to_string();
+            if reason.contains("cannot open") {
+                println!("skipping: no usable TPM on this machine ({error})");
+            } else {
+                println!("the TPM provider cannot serve the direct form: {error}");
+                assert!(
+                    reason.contains("cannot hold master key material"),
+                    "the reason must say why the provider is unusable: {error}"
+                );
+            }
         }
     }
 
