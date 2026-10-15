@@ -84,7 +84,7 @@ windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography"] }
 #
 # Only the Android target carries it; on any other target the module is not compiled.
 [target.'cfg(target_os = "android")'.dependencies]
-jni = { version = "0.21", default-features = false, features = ["invocation"] }
+jni = { version = "0.22", default-features = false, features = ["invocation"] }
 
 [features]
 # Exposes the pure software in-memory keystore so upper layers can use it in
