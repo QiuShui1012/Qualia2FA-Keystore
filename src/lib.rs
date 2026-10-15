@@ -214,10 +214,44 @@ pub use keystore::{MockDirectMasterKeyStore, MockKeyStore, MockWrappedMasterKeyS
 ///
 /// For the runtime situation, use [`DeviceKeyStore::backend`].
 ///
-/// Only Windows returns `true` today. On unimplemented platforms the function returns
-/// `false`, and every operation of [`keystore::PlatformKeyStore`] returns
+/// Windows and Android return `true` today: those are the platforms
+/// [`keystore::PlatformKeyStore`] has a backend for. On every other platform the function
+/// returns `false`, and every operation of [`keystore::PlatformKeyStore`] returns
 /// [`Error::UnsupportedPlatform`] — there is **no** fallback to a software key.
 #[must_use]
 pub const fn platform_backend_is_implemented() -> bool {
-    cfg!(target_os = "windows")
+    cfg!(any(target_os = "windows", target_os = "android"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the answer on the platform this test is compiled on.
+    #[test]
+    fn platform_backend_is_implemented_is_pinned_per_platform() {
+        let implemented = platform_backend_is_implemented();
+
+        #[cfg(target_os = "windows")]
+        assert!(implemented, "Windows has a CNG backend");
+        #[cfg(target_os = "android")]
+        assert!(implemented, "Android has a Keystore backend");
+        #[cfg(not(any(target_os = "windows", target_os = "android")))]
+        assert!(!implemented, "this platform has no key store backend");
+    }
+
+    /// Ties the predicate to the backend `PlatformKeyStore` actually resolves to, so that
+    /// pointing `PlatformKeyStore` at a new backend without revisiting the predicate fails
+    /// here instead of answering `false` on a platform that has one.
+    #[test]
+    fn platform_backend_is_implemented_agrees_with_the_selected_backend() {
+        let selected = core::any::type_name::<keystore::PlatformKeyStore>();
+        let wired_up = !selected.contains("platform_stub");
+
+        assert_eq!(
+            platform_backend_is_implemented(),
+            wired_up,
+            "PlatformKeyStore resolves to {selected}"
+        );
+    }
 }

@@ -44,6 +44,7 @@ device::verify(signer.public_key(), message, &signature)?;
 Implemented:
 
 - The abstraction: `DeviceKeyStore` / `DeviceSigner`, plus backend capability queries
+  (`platform_backend_is_implemented()` returns `true` on Windows and Android)
 - The abstraction: `DirectMasterKeyStore` / `WrappedMasterKeyStore`, the two ways of holding
   the application's master key
 - **Windows**: CNG `NCrypt*` + TPM 2.0 (`MS_PLATFORM_CRYPTO_PROVIDER`)

@@ -40,6 +40,7 @@ device::verify(signer.public_key(), message, &signature)?;
 已实现：
 
 - 抽象层：`DeviceKeyStore` / `DeviceSigner`，以及后端能力查询
+  （`platform_backend_is_implemented()` 在 Windows 与 Android 上返回 `true`）
 - 抽象层：`DirectMasterKeyStore` / `WrappedMasterKeyStore`（应用主密钥的两种存法）
 - **Windows**：CNG `NCrypt*` + TPM 2.0（`MS_PLATFORM_CRYPTO_PROVIDER`）
 - **Windows（无 TPM 时）**：CNG 软件密钥库降级路径
