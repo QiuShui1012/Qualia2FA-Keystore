@@ -74,6 +74,14 @@
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+/// The Android platform API, as the platform declares it.
+///
+/// Test-only: it holds the declarations every JNI descriptor of the Android backend is
+/// checked against, and no runtime code. Every target compiles it, so the check runs
+/// wherever `cargo test` does rather than only on Android.
+#[cfg(test)]
+mod android_api;
+
 /// Android Keystore backend, reached over JNI.
 #[cfg(target_os = "android")]
 pub mod android;

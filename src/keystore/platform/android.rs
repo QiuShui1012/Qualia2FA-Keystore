@@ -1151,6 +1151,16 @@ fn cipher<'local>(env: &mut JNIEnv<'local>) -> Result<JObject<'local>> {
 /// A secret key is described by `SecretKeyFactory`, not by `KeyFactory` (which handles the
 /// asymmetric algorithms only), and the `KeyInfo` it returns is the platform's own answer.
 ///
+/// # The first parameter is a `SecretKey`, not a `Key`
+///
+/// Android declares `SecretKeyFactory.getKeySpec(javax.crypto.SecretKey, java.lang.Class)`
+/// where Java SE declares `SecretKeyFactory.getKeySpec(java.security.Key, java.lang.Class)`.
+/// JNI resolves a method by name and descriptor at call time, so the Java SE descriptor is
+/// not a compile error here: it is a `NoSuchMethodError` on every Android device, which is
+/// what [`Error::Jni`] reports. The descriptor below is the platform's; the test-only module
+/// `platform::android_api` holds it, and every other descriptor of this backend, against
+/// Android's own declarations.
+///
 /// # Errors
 ///
 /// [`Error::Jni`] when the platform refuses to describe the key.
@@ -1186,7 +1196,7 @@ fn secret_key_is_hardware_backed<'local>(
         env,
         &factory,
         "getKeySpec",
-        "(Ljava/security/Key;Ljava/lang/Class;)Ljava/security/spec/KeySpec;",
+        "(Ljavax/crypto/SecretKey;Ljava/lang/Class;)Ljava/security/spec/KeySpec;",
         &[JValue::Object(key), JValue::Object(&info)],
         operation,
     )?;
