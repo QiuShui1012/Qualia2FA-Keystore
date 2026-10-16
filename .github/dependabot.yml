@@ -26,6 +26,25 @@ updates:
         update-types:
           - minor
           - patch
+    # `jni` is not a dependency this repository may move on its own. The Android keystore
+    # backend is written against the 0.21 API: `JNIEnv` passed as `&mut`, object handles
+    # carrying a local-frame lifetime, `GlobalRef`/`AutoLocal`, object references borrowed
+    # into `JValue`. 0.22 reworks exactly those types - `JNIEnv` split into `EnvUnowned`
+    # and `Env`, `Env` borrowable only from an `AttachGuard`, `GlobalRef` replaced by
+    # `Global`, `JValueGen` removed, several calls made fallible - and it lands as 114
+    # compile errors across `src/keystore/platform/android.rs` and
+    # `src/keystore/platform/android/java.rs`. That port has to be verified against a real
+    # Android keystore, so it is a deliberate change rather than a weekly proposal, and
+    # patch releases inside the 0.21 line are not affected by this rule.
+    #
+    # Security updates are not affected by `ignore` either (Dependabot opens those
+    # regardless), so an advisory against the pinned version still arrives - as it should,
+    # because a security fix and a port to a new API are then the same decision.
+    ignore:
+      - dependency-name: "jni"
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: "/"

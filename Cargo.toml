@@ -83,6 +83,11 @@ windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography"] }
 # store is reached from Rust threads the JVM has never seen.
 #
 # Only the Android target carries it; on any other target the module is not compiled.
+#
+# The version stays in the 0.21 line deliberately: 0.22 reworks the types every call here
+# is written against (`JNIEnv` split into `EnvUnowned`/`Env`, `Env` borrowable only from an
+# `AttachGuard`, `GlobalRef` replaced by `Global`, `JValueGen` removed, several calls made
+# fallible), so moving is a port to be made and verified against a real Android keystore.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", default-features = false, features = ["invocation"] }
 
