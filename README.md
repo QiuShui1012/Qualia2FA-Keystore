@@ -45,7 +45,7 @@ device::verify(signer.public_key(), message, &signature)?;
 - **Windows**：CNG `NCrypt*` + TPM 2.0（`MS_PLATFORM_CRYPTO_PROVIDER`）
 - **Windows（无 TPM 时）**：CNG 软件密钥库降级路径
 - **Windows 主密钥**：包裹形式优先走 TPM，直接形式走软件密钥库（原因见下文）
-- **Android 主密钥**：两种形式都架在 Android Keystore 上（仅交叉编译校验，未在真机上验证）
+- **Android 主密钥**：两种形式都架在 Android Keystore 上（已在 Android 17 的真机上用过）
 - **Android**：Keystore / StrongBox
 - 测试用的内存后端（`mock` feature，**默认关闭**）
 

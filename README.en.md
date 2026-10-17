@@ -51,8 +51,8 @@ Implemented:
 - **Windows without a TPM**: the CNG software key store path
 - **Windows master keys**: the wrapped form prefers the TPM, the direct form lands on the
   software key store (why: see below)
-- **Android master keys**: both forms on top of the Android Keystore (cross-compile checked
-  only, not verified on a device)
+- **Android master keys**: both forms on top of the Android Keystore (used on a real device
+  running Android 17)
 - **Android**: Keystore / StrongBox
 - An in-memory backend for tests (the `mock` feature, **off by default**)
 
