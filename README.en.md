@@ -1,17 +1,33 @@
+<div align="center" style="align-items: center">
+
 # QualiaDeviceIdentityKit
+
+[简体中文](README.md) | English
 
 A device identity toolkit: **P-256 device identity primitives** plus **platform-native
 hardware keystores**.
 
-It wraps "generate an ECDSA P-256 key inside the device hardware, read its public key, let
-the hardware sign a message" in a safe Rust interface, and provides the **public-key side**
+[![License](https://img.shields.io/github/license/Qualia2FA/QualiaDeviceIdentityKit?label=License)][License]
+[![Releases](https://img.shields.io/github/downloads/Qualia2FA/QualiaDeviceIdentityKit/total?logo=github&label=Downloads)][Releases]
+[![crates.io](https://img.shields.io/crates/d/qualia-dik?logo=crates.io&label=crates.io+Downloads)][crates.io]
+
+[License]: LICENSE
+
+[Releases]: https://github.com/Qualia2FA/QualiaDeviceIdentityKit/releases
+
+[crates.io]: https://crates.io/crates/qualia-dik
+
+</div>
+
+---
+
+The library wraps "generate an ECDSA P-256 key inside the device hardware, read its public key,
+let the hardware sign a message" in a safe Rust interface, and provides the **public-key side**
 as well — representation, fingerprints and verification — so that callers never touch a
 platform API and never reimplement the curve arithmetic.
 
 The private key **never leaves the hardware** and never enters this process's address
 space.
-
-中文版见 [README.md](README.md).
 
 ## Two halves, one concept
 
@@ -41,7 +57,7 @@ device::verify(signer.public_key(), message, &signature)?;
 
 ## Status
 
-Implemented:
+The following parts are implemented:
 
 - The abstraction: `DeviceKeyStore` / `DeviceSigner`, plus backend capability queries
   (`platform_backend_is_implemented()` returns `true` on Windows and Android)
@@ -132,7 +148,7 @@ and neither dresses a software backend up as hardware.
 
 ```toml
 [dependencies]
-qualia-dik = "0.1"
+qualia-dik = "0.1.3"
 ```
 
 To use the in-memory backend in your own tests (for example to test protocol logic on a CI
@@ -140,7 +156,7 @@ machine without a TPM):
 
 ```toml
 [dev-dependencies]
-qualia-dik = { version = "0.1", features = ["mock"] }
+qualia-dik = { version = "0.1.3", features = ["mock"] }
 ```
 
 ```rust

@@ -1,20 +1,36 @@
+<div align="center" style="align-items: center">
+
 # QualiaDeviceIdentityKit
+
+简体中文 | [English](README.en.md)
 
 设备身份工具箱：**P-256 设备身份原语**，加上**平台原生的硬件密钥库**。
 
-它把「在设备硬件里生成一个 ECDSA P-256 密钥、取回公钥、让硬件对消息签名」封装成
+[![License](https://img.shields.io/github/license/Qualia2FA/QualiaDeviceIdentityKit?label=License)][License]
+[![Releases](https://img.shields.io/github/downloads/Qualia2FA/QualiaDeviceIdentityKit/total?logo=github&label=Downloads)][Releases]
+[![crates.io](https://img.shields.io/crates/d/qualia-dik?logo=crates.io&label=crates.io+Downloads)][crates.io]
+
+[License]: LICENSE
+
+[Releases]: https://github.com/Qualia2FA/QualiaDeviceIdentityKit/releases
+
+[crates.io]: https://crates.io/crates/qualia-dik
+
+</div>
+
+---
+
+该库把「在设备硬件里生成一个 ECDSA P-256 密钥、取回公钥、让硬件对消息签名」封装成
 安全的 Rust 接口，同时提供**公钥侧**的表示、指纹与验签——让上层不必接触任何平台
 原生 API，也不必自己实现一遍曲线运算。
 
 私钥**永不离开硬件**，也永不进入本进程的地址空间。
 
-English version: [README.en.md](README.en.md).
-
 ## 两半，一个概念
 
-| 模块 | 做什么 | 持私钥吗 |
-|------|--------|----------|
-| `device` | 公钥表示、设备指纹（`DeviceId`）、验签 | 否 |
+| 模块       | 做什么                                       | 持私钥吗       |
+|------------|----------------------------------------------|----------------|
+| `device`   | 公钥表示、设备指纹（`DeviceId`）、验签       | 否             |
 | `keystore` | 生成密钥、取公钥、对消息签名、存放应用主密钥 | 是（在硬件里） |
 
 两者共用同一个错误类型。分开的原因很实际：**一台设备必须能验证别人的签名，而它
@@ -37,7 +53,7 @@ device::verify(signer.public_key(), message, &signature)?;
 
 ## 状态
 
-已实现：
+已实现如下部分：
 
 - 抽象层：`DeviceKeyStore` / `DeviceSigner`，以及后端能力查询
   （`platform_backend_is_implemented()` 在 Windows 与 Android 上返回 `true`）
@@ -67,10 +83,10 @@ device::verify(signer.public_key(), message, &signature)?;
 钥是 `MasterKey` 里 32 字节的不透明材料：本 crate 只把它在调用方与平台之间搬运，不从
 中派生任何东西。有两种存法，**由调用方选哪个类型决定**，不是运行期开关：
 
-| 形式 | 契约 | 平台库里放什么 | 调用方要持久化什么 |
-|---|---|---|---|
-| 直接 | `DirectMasterKeyStore` | 主密钥材料本身 | 什么都不用 |
-| 包裹 | `WrappedMasterKeyStore` | 一把**不可导出**的 KEK | 返回的包裹字节 |
+| 形式 | 契约                    | 平台库里放什么         | 调用方要持久化什么 |
+|------|-------------------------|------------------------|--------------------|
+| 直接 | `DirectMasterKeyStore`  | 主密钥材料本身         | 什么都不用         |
+| 包裹 | `WrappedMasterKeyStore` | 一把**不可导出**的 KEK | 返回的包裹字节     |
 
 ```rust
 use qualia_dik::{
@@ -101,11 +117,11 @@ KEK 的加解密**不出现在任何接口里**：没有 wrap / unwrap / encrypt
 任何方法能拿到那把钥匙——包裹是这一形式的内部设计。两种形式都通过 `backend()` 如实报
 告实际生效的后端，绝不用软件后端冒充硬件。
 
-| 平台 | 直接 | 包裹 |
-|---|---|---|
+| 平台    | 直接                                                 | 包裹                            |
+|---------|------------------------------------------------------|---------------------------------|
 | Windows | 软件密钥库（TPM 提供程序会导入密钥却拒绝导出，见下） | 有 TPM 时用 TPM，否则软件密钥库 |
-| Android | 已实现，报告 keystore 对该条目的说法 | 已实现，优先 StrongBox |
-| 其它 | `UnsupportedPlatform` | `UnsupportedPlatform` |
+| Android | 已实现，报告 keystore 对该条目的说法                 | 已实现，优先 StrongBox          |
+| 其它    | `UnsupportedPlatform`                                | `UnsupportedPlatform`           |
 
 > Windows 上值得先知道的一点：**直接**形式只能落在软件密钥库上，因为 Microsoft
 > Platform Crypto Provider 会接受我们的密钥、然后拒绝把材料导出（`NTE_PERM`）。一个
@@ -117,14 +133,14 @@ KEK 的加解密**不出现在任何接口里**：没有 wrap / unwrap / encrypt
 
 ```toml
 [dependencies]
-qualia-dik = "0.1"
+qualia-dik = "0.1.3"
 ```
 
 要在自己的测试里使用内存后端（例如在没有 TPM 的 CI 上测试协议逻辑）：
 
 ```toml
 [dev-dependencies]
-qualia-dik = { version = "0.1", features = ["mock"] }
+qualia-dik = { version = "0.1.3", features = ["mock"] }
 ```
 
 ```rust
